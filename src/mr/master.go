@@ -1,18 +1,37 @@
 package mr
 
-import "log"
+import (
+	"log"
+	"sync"
+)
 import "net"
 import "os"
 import "net/rpc"
 import "net/http"
 
-
 type Master struct {
-	// Your definitions here.
-
+	mu          sync.Mutex
+	nMap        int
+	mapTasks    []mapTaskSet
+	nReduce     int
+	reduceTasks []reduceTaskSet
 }
 
-// Your code here -- RPC handlers for the worker to call.
+func (m *Master) convertMapTaskStatus(task int, from, to mapStatus) {
+	if from == to {
+		return
+	}
+	rmd := m.mapTasks[from].removeTask(task)
+	m.mapTasks[to].addTask(rmd)
+}
+
+func (m *Master) convertReduceTaskStatus(task int, from, to reduceStatus) {
+	if task == 0 || from == to || !m.reduceTasks[from].contains(task) {
+		return
+	}
+	m.reduceTasks[from].removeTask(task)
+	m.reduceTasks[to].addTask(task)
+}
 
 //
 // an example RPC handler.
@@ -23,7 +42,6 @@ func (m *Master) Example(args *ExampleArgs, reply *ExampleReply) error {
 	reply.Y = args.X + 1
 	return nil
 }
-
 
 //
 // start a thread that listens for RPCs from worker.go
@@ -46,12 +64,10 @@ func (m *Master) server() {
 // if the entire job has finished.
 //
 func (m *Master) Done() bool {
-	ret := false
+	m.mu.Lock()
+	defer m.mu.Unlock()
 
-	// Your code here.
-
-
-	return ret
+	return m.reduceTasks[ReduceTaskInit].isEmpty() && m.reduceTasks[TaskReducing].isEmpty()
 }
 
 //
@@ -60,11 +76,34 @@ func (m *Master) Done() bool {
 // nReduce is the number of reduce tasks to use.
 //
 func MakeMaster(files []string, nReduce int) *Master {
-	m := Master{}
-
-	// Your code here.
-
+	m := &Master{}
+	m.initMapTasks(files)
+	m.initReduceTasks(nReduce)
+	m.nMap = len(files)
+	m.nReduce = nReduce
 
 	m.server()
-	return &m
+	return m
+}
+
+func (m *Master) initMapTasks(files []string) {
+	m.mapTasks = make([]mapTaskSet, MapStatusCnt)
+	for i := range m.mapTasks {
+		m.mapTasks[i] = make(mapTaskSet, len(files))
+	}
+	taskSet := m.mapTasks[MapTaskInit]
+	for i, f := range files {
+		taskSet.addTask(&mapTask{id: i, filename: f})
+	}
+}
+
+func (m *Master) initReduceTasks(nReduce int) {
+	m.reduceTasks = make([]reduceTaskSet, ReduceStatusCnt)
+	for i := range m.reduceTasks {
+		m.reduceTasks[i] = make(reduceTaskSet, nReduce)
+	}
+	taskSet := m.reduceTasks[ReduceTaskInit]
+	for i := 0; i < nReduce; i++ {
+		taskSet.addTask(i)
+	}
 }

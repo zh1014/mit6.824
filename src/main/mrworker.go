@@ -10,21 +10,35 @@ package main
 // Please do not change this file.
 //
 
-import "../mr"
+import (
+	"../mr"
+	"strconv"
+)
 import "plugin"
 import "os"
 import "fmt"
 import "log"
 
 func main() {
-	if len(os.Args) != 2 {
-		fmt.Fprintf(os.Stderr, "Usage: mrworker xxx.so\n")
+	if len(os.Args) != 4 {
+		fmt.Fprintf(os.Stderr, "Usage: mrworker xxx.so workerType(map|reduce) workerID\n")
 		os.Exit(1)
 	}
 
 	mapf, reducef := loadPlugin(os.Args[1])
 
-	mr.Worker(mapf, reducef)
+	wID, err := strconv.Atoi(os.Args[3])
+	if err != nil {
+		log.Fatalf("invalid worker id: %v", err)
+	}
+	typ := os.Args[2]
+	if typ == "map" {
+		mr.MapWorker(wID, mapf)
+	} else if typ == "reduce" {
+		mr.ReduceWorker(wID, reducef)
+	} else {
+		log.Fatalf("unknown worker type %v", typ)
+	}
 }
 
 //
