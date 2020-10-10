@@ -80,10 +80,9 @@ func writeKV2TmpFile(workerID, taskID int, kv KeyValue, tmpFiles []*os.File) {
 	var err error
 	if out == nil {
 		tmpFilename := strings.Join([]string{"tmp", strconv.Itoa(workerID), strconv.Itoa(taskID), strconv.Itoa(reduceID)}, "-")
-		out, err = os.Open(tmpFilename)
-		if err != nil {
-			log.Fatalf("open output file: %v", err)
-		}
+		out, err = os.Create(tmpFilename)
+		checkFail("writeKV2TmpFile: open output file", err)
+		tmpFiles[reduceID] = out
 	}
 	enc := json.NewEncoder(out) // fixme(zhanghao): pass []*json.Encoder to avoid creating duplicated encoder
 	err = enc.Encode(&kv)
@@ -91,6 +90,8 @@ func writeKV2TmpFile(workerID, taskID int, kv KeyValue, tmpFiles []*os.File) {
 		log.Fatalf("encode to output file: %v", err)
 	}
 }
+
+// ------------------ reduce ------------------
 
 func ReduceWorker(workerID int, reducef func(string, []string) string) {
 	r := NReduceReply{}
