@@ -1,3 +1,11 @@
 pkg/
 api.key
 *-handin.tar.gz
+.idea
+mr-tmp/
+mr/worker_mgr.go.deprecated
+mrmaster
+mrsequential
+mrworker
+wc.so
+mrapps/*.so

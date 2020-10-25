@@ -11,34 +11,21 @@ package main
 //
 
 import (
-	"../mr"
-	"strconv"
+	"fmt"
+	"log"
+	"mit6.824/mr"
+	"os"
+	"plugin"
 )
-import "plugin"
-import "os"
-import "fmt"
-import "log"
 
 func main() {
-	if len(os.Args) != 4 {
-		fmt.Fprintf(os.Stderr, "Usage: mrworker xxx.so workerType(map|reduce) workerID\n")
+	if len(os.Args) != 2 {
+		fmt.Fprintf(os.Stderr, "Usage: mrworker xxx.so workerType(m:map|r:reduce)\n")
 		os.Exit(1)
 	}
 
 	mapf, reducef := loadPlugin(os.Args[1])
-
-	wID, err := strconv.Atoi(os.Args[3])
-	if err != nil {
-		log.Fatalf("invalid worker id: %v", err)
-	}
-	typ := os.Args[2]
-	if typ == "map" {
-		mr.MapWorker(wID, mapf)
-	} else if typ == "reduce" {
-		mr.ReduceWorker(wID, reducef)
-	} else {
-		log.Fatalf("unknown worker type %v", typ)
-	}
+	mr.WorkerRun(mapf, reducef)
 }
 
 //
@@ -48,7 +35,7 @@ func main() {
 func loadPlugin(filename string) (func(string, string) []mr.KeyValue, func(string, []string) string) {
 	p, err := plugin.Open(filename)
 	if err != nil {
-		log.Fatalf("cannot load plugin %v", filename)
+		log.Fatalf("cannot load plugin %v: %v", filename, err)
 	}
 	xmapf, err := p.Lookup("Map")
 	if err != nil {
