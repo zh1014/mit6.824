@@ -49,7 +49,7 @@ package labrpc
 //   pass svc to srv.AddService()
 //
 
-import "../labgob"
+import "mit6.824/labgob"
 import "bytes"
 import "reflect"
 import "sync"
@@ -76,6 +76,11 @@ type ClientEnd struct {
 	endname interface{}   // this end-point's name
 	ch      chan reqMsg   // copy of Network.endCh
 	done    chan struct{} // closed when Network is cleaned up
+}
+
+type LogEntry struct {
+	Term int
+	Cmd []byte
 }
 
 // send an RPC, wait for the reply.
