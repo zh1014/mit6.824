@@ -19,7 +19,7 @@ func DPrintf(format string, a ...interface{}) (n int, err error) {
 func logConfig() {
 	logrus.SetLevel(logrus.DebugLevel)
 	if logOutput != "" {
-		f, err := os.OpenFile(logOutput, os.O_WRONLY, 777)
+		f, err := os.Create(logOutput)
 		if err != nil {
 			panic(err)
 		}

@@ -9,6 +9,7 @@ package raft
 //
 
 import (
+	"github.com/sirupsen/logrus"
 	"mit6.824/labrpc"
 	"runtime/debug"
 )
@@ -236,7 +237,7 @@ func (cfg *config) cleanup() {
 
 // attach server i to the net.
 func (cfg *config) connect(i int) {
-	// fmt.Printf("connect(%d)\n", i)
+	logrus.Infof("connect(%d)", i)
 
 	cfg.connected[i] = true
 
@@ -259,7 +260,7 @@ func (cfg *config) connect(i int) {
 
 // detach server i from the net.
 func (cfg *config) disconnect(i int) {
-	// fmt.Printf("disconnect(%d)\n", i)
+	logrus.Infof("disconnect(%d)", i)
 
 	cfg.connected[i] = false
 
@@ -353,11 +354,12 @@ func (cfg *config) checkTerms() int {
 
 // check that there's no leader
 func (cfg *config) checkNoLeader() {
+	logrus.Debugf("checkNoLeader")
 	for i := 0; i < cfg.n; i++ {
 		if cfg.connected[i] {
-			_, is_leader := cfg.rafts[i].GetState()
+			term, is_leader := cfg.rafts[i].GetState()
 			if is_leader {
-				cfg.t.Fatalf("expected no leader, but %v claims to be leader", i)
+				cfg.t.Fatalf("expected no leader, but %v claims to be leader[Term%v]", i, term)
 			}
 		}
 	}
@@ -466,6 +468,9 @@ func (cfg *config) one(cmd interface{}, expectedServers int, retry bool) int {
 						// and it was the command we submitted.
 						return index
 					}
+				}
+				if nd > 0 {
+					cfg.t.Logf("one(%v), nd=%v, cmd1=%v", cmd, nd, cmd1)
 				}
 				time.Sleep(20 * time.Millisecond)
 			}

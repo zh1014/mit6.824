@@ -49,7 +49,10 @@ package labrpc
 //   pass svc to srv.AddService()
 //
 
-import "mit6.824/labgob"
+import (
+	"github.com/sirupsen/logrus"
+	"mit6.824/labgob"
+)
 import "bytes"
 import "reflect"
 import "sync"
@@ -80,7 +83,7 @@ type ClientEnd struct {
 
 type LogEntry struct {
 	Term int
-	Cmd []byte
+	Cmd interface{}
 }
 
 // send an RPC, wait for the reply.
@@ -101,6 +104,7 @@ func (e *ClientEnd) Call(svcMeth string, args interface{}, reply interface{}) bo
 	//
 	// send the request.
 	//
+	logrus.Debugf("Call %v(args=%+v): sending request...", svcMeth, args)
 	select {
 	case e.ch <- req:
 		// the request has been sent.
@@ -109,6 +113,8 @@ func (e *ClientEnd) Call(svcMeth string, args interface{}, reply interface{}) bo
 		return false
 	}
 
+	logrus.Debugf("Call %v(args=%+v): send request done, waiting reply...", svcMeth, args)
+	defer logrus.Debugf("Call %v(args=%+v): reply back! reply=%+v", svcMeth, args, reply)
 	//
 	// wait for the reply.
 	//

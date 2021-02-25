@@ -9,6 +9,7 @@ package raft
 //
 
 import (
+	"github.com/sirupsen/logrus"
 	"testing"
 )
 import "fmt"
@@ -16,6 +17,13 @@ import "time"
 import "math/rand"
 import "sync/atomic"
 import "sync"
+
+func TestLoop(t *testing.T) {
+	const loopTimes = 10
+	for i := 0; i < loopTimes; i ++ {
+		TestReElection2A(t)
+	}
+}
 
 // The tester generously allows solutions to complete elections in one second
 // (much more than the paper's range of timeouts).
@@ -60,23 +68,28 @@ func TestReElection2A(t *testing.T) {
 	defer cfg.cleanup()
 
 	cfg.begin("Test (2A): election after network failure")
+	logrus.Info("begin...........")
 
 	leader1 := cfg.checkOneLeader()
+	logrus.Infof("checkOneLeader passed leader1=%v", leader1)
 
 	// if the leader disconnects, a new one should be elected.
 	cfg.disconnect(leader1)
 	cfg.checkOneLeader()
+	logrus.Info("checkOneLeader passed")
 
 	// if the old leader rejoins, that shouldn't
 	// disturb the new leader.
 	cfg.connect(leader1)
 	leader2 := cfg.checkOneLeader()
+	logrus.Infof("checkOneLeader passed leader2=%v", leader2)
 
 	// if there's no quorum, no leader should
 	// be elected.
 	cfg.disconnect(leader2)
 	cfg.disconnect((leader2 + 1) % servers)
 	time.Sleep(2 * RaftElectionTimeout)
+	// 很容易检测到之前的leader，除非在 disconnect 前等至少7秒
 	cfg.checkNoLeader()
 
 	// if a quorum arises, it should elect a leader.
@@ -91,6 +104,7 @@ func TestReElection2A(t *testing.T) {
 }
 
 func TestBasicAgree2B(t *testing.T) {
+	logConfig()
 	servers := 3
 	cfg := make_config(t, servers, false)
 	defer cfg.cleanup()

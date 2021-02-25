@@ -56,6 +56,16 @@ const (
 	leader
 )
 
+var roleString = map[raftRole]string{
+	follower:  "follower",
+	candidate: "candidate",
+	leader:    "leader",
+}
+
+func (r raftRole) String() string {
+	return roleString[r]
+}
+
 //
 // A Go object implementing a single Raft peer.
 //
@@ -66,10 +76,10 @@ type Raft struct {
 	log         []*labrpc.LogEntry
 
 	// Volatile state
-	peers           []*labrpc.ClientEnd // RPC end points of all peers.
-	me              int                 // this peer's index into peers[]
-	persister       *Persister          // Object to hold this peer's persisted state
-	dead            int32               // set by Kill()
+	peers     []*labrpc.ClientEnd // RPC end points of all peers.
+	me        int                 // this peer's index into peers[]
+	persister *Persister          // Object to hold this peer's persisted state
+	dead      int32               // set by Kill()
 
 	mu              sync.Mutex // Lock to protect shared access to this peer's follow state
 	currentLeader   int
@@ -94,13 +104,16 @@ type Snapshot struct {
 type LeaderState struct {
 	nextIndex  []int
 	matchIndex []int
-	appendEntry chan struct{} // 有新的cmd，或者需要发心跳包
-	nextHeartbeat int64
+	heartbeatCond *sync.Cond
+	lastHeartbeat []int64
 }
 
 type CandidateState struct {
 	voteGot          []bool
-	failedOnThisTerm bool // for candidate
+}
+
+func (l *LeaderState) needHeartbeat(peerID int) bool {
+	return nowUnixNano() - l.lastHeartbeat[peerID] > int64(heartbeatIntv)
 }
 
 // outer lock
@@ -112,16 +125,24 @@ func (rf *Raft) ticker() {
 	// TODO howZ: 每一个tick要check的东西太多了！ optimize：时间轮算法
 	const tickInterval = time.Millisecond
 	for {
-		<- time.After(tickInterval)
+		<-time.After(tickInterval)
 		rf.mu.Lock()
-		if rf.role == leader && nowUnixNano() > rf.leaderState.nextHeartbeat {
-			rf.leaderState.nextHeartbeat = nowUnixNano() + heartbeatIntv
-			rf.mu.Unlock()
-			rf.leaderState.appendEntry <- struct{}{}
-			rf.mu.Lock()
+		if nowUnixNano() > rf.elecTimeout {
+			if rf.role != leader {
+				rf.initiateNewElection()
+			}
 		}
-		if rf.role != leader && nowUnixNano() > rf.elecTimeout {
-			rf.statusCond.Signal()
+		if rf.role == leader {
+			for peerID := range rf.peers {
+				if peerID == rf.me {
+					continue
+				}
+				if !rf.leaderState.needHeartbeat(peerID) {
+					continue
+				}
+				rf.leaderState.heartbeatCond.Broadcast()
+				break
+			}
 		}
 		rf.mu.Unlock()
 	}
@@ -247,6 +268,7 @@ type AppendEntryReply struct {
 func (rf *Raft) AppendEntry(args *AppendEntryArgs, reply *AppendEntryReply) {
 	rf.mu.Lock()
 	defer rf.mu.Unlock()
+	logrus.Debugf("%s receive AppendEntry, args=%+v", rf.desc(), args)
 
 	reply.Term = rf.currentTerm
 	if args.Term < rf.currentTerm {
@@ -254,18 +276,13 @@ func (rf *Raft) AppendEntry(args *AppendEntryArgs, reply *AppendEntryReply) {
 		return
 	}
 
-	switch rf.role {
-	case follower:
+	if rf.role == follower {
 		rf.resetTimeout()
-	case candidate:
-		rf.candidateState.failedOnThisTerm = true
-		rf.statusCond.Signal()
-	case leader:
 	}
-	if args.Term > rf.currentTerm {
-		rf.currentTerm = args.Term
-		rf.biggerTermFound = true
-		rf.statusCond.Signal()
+	if args.Term >= rf.currentTerm {
+		if rf.role == candidate || rf.role == leader {
+			rf.changeToFollower(args.Term)
+		}
 	}
 
 	var start int
@@ -299,6 +316,10 @@ func (rf *Raft) AppendEntry(args *AppendEntryArgs, reply *AppendEntryReply) {
 		rf.applyCond.Signal()
 	}
 	reply.Success = true
+}
+
+func (rf *Raft) desc() string {
+	return fmt.Sprintf("[Term%v|peer%v|%v]", rf.currentTerm, rf.me, rf.role)
 }
 
 // 根据 单增索引 在log中查找对应条目，返回实际位置
@@ -385,26 +406,28 @@ func (rf *Raft) sendRequestVote(server int, args *RequestVoteArgs) {
 
 	rf.mu.Lock()
 	defer rf.mu.Unlock()
-
 	if reply.Term < rf.currentTerm {
-		logrus.Warnf("sendRequestVote: term %d in reply is less than current term %d", reply.Term, rf.currentTerm)
 		return
 	}
 	if reply.Term > rf.currentTerm {
-		logrus.Warnf("bigger term %d received, currentTerm=%d", reply.Term, rf.currentTerm)
-		rf.currentTerm = reply.Term
-		rf.biggerTermFound = true
-		rf.statusCond.Signal()
+		logrus.Debugf("bigger term %d received, currentTerm=%d", reply.Term, rf.currentTerm)
+		if rf.role == candidate || rf.role == leader {
+			rf.changeToFollower(reply.Term)
+		}
 		return
 	}
-	if !reply.VoteGranted {
-		logrus.Infof("peer %d refused to vote for candidate %d", server, rf.me)
+	if rf.role != candidate {
+		// 此轮选举已经结束
 		return
 	}
 
-	logrus.Infof("candidate %d got vote from peer %d", rf.me, server)
-	rf.candidateState.voteGot[server] = true
-	rf.statusCond.Signal()
+	logrus.Debugf("%s request vote from peer%v, VoteGranted=%v", rf.desc(), server, reply.VoteGranted)
+	if reply.VoteGranted {
+		rf.candidateState.voteGot[server] = true
+		if rf.gotMajorityVote() {
+			rf.changeToLeader()
+		}
+	}
 }
 
 //
@@ -422,23 +445,22 @@ func (rf *Raft) sendRequestVote(server int, args *RequestVoteArgs) {
 // the leader.
 //
 func (rf *Raft) Start(command interface{}) (int, int, bool) {
-	index := -1
-	term := -1
-	isLeader := true
-
-	// Your code here (2B).
 	rf.mu.Lock()
 	defer rf.mu.Unlock()
 
-	if rf.role == leader {
-		rf.mu.Unlock()
-		rf.leaderState.appendEntry <- struct{}{}
-		rf.mu.Lock()
-	} else {
-
+	index := -1
+	term := -1
+	if rf.role != leader {
+		return index, term, false
 	}
-
-	return index, term, isLeader
+	rf.log = append(rf.log, &labrpc.LogEntry{
+		Term: rf.currentTerm,
+		Cmd:  command,
+	})
+	term, index = rf.lastLogTermIndex()
+	rf.leaderState.matchIndex[rf.me] = index
+	rf.leaderState.heartbeatCond.Broadcast()
+	return index, term, true
 }
 
 //
@@ -470,45 +492,32 @@ func (rf *Raft) randElectionTimeout() int64 {
 	return ElectionTimeoutLowerLimit + rf.rand.Int63n(ElectionTimeoutRange)
 }
 
-// implement of status machine of Figure 4 on paper
-func (rf *Raft) StatusMachineRun() {
-	nextRole := follower
-	for {
-		switch nextRole {
-		case follower:
-			rf.turnToFollower()
-			nextRole = rf.onRoleFollower()
-		case candidate:
-			rf.turnToCandidate()
-			nextRole = rf.onRoleCandidate()
-		case leader:
-			rf.turnToLeader()
-			nextRole = rf.onRoleLeader()
-		default:
-			logrus.Fatalf("can not convert to unknown role %v", rf.role)
-		}
-	}
-}
-
-func (rf *Raft) turnToFollower() {
-	rf.mu.Lock()
+// outer lock
+func (rf *Raft) changeToFollower(term int) {
+	from := rf.desc()
 	rf.role = follower
+	rf.currentTerm = term
 	rf.resetTimeout()
-	rf.mu.Unlock()
-	logrus.Debugf("term %v, peer %v become follower", rf.currentTerm, rf.me)
+	logrus.Infof("%s -> %s", from, rf.desc())
 }
 
-func (rf *Raft) turnToCandidate() {
-	rf.mu.Lock()
-	defer rf.mu.Unlock()
-
+func (rf *Raft) initiateNewElection() {
+	from := rf.desc()
 	rf.role = candidate
 	rf.currentTerm++
+	logrus.Infof("%s -> %s", from, rf.desc())
 	rf.resetTimeout()
 	if rf.candidateState == nil {
-		rf.candidateState = &CandidateState{voteGot: make([]bool, len(rf.peers))}
+		rf.candidateState = &CandidateState{}
 	}
-	rf.candidateState.failedOnThisTerm = false
+	rf.candidateState.voteGot = make([]bool, len(rf.peers))
+
+	// vote for self
+	rf.candidateState.voteGot[rf.me] = true
+	if rf.gotMajorityVote() {
+		rf.changeToLeader()
+		return
+	}
 
 	args := &RequestVoteArgs{
 		Term:        rf.currentTerm,
@@ -517,30 +526,27 @@ func (rf *Raft) turnToCandidate() {
 	args.LastLogTerm, args.LastLogIndex = rf.lastLogTermIndex()
 	for i := range rf.peers {
 		if i == rf.me {
-			rf.candidateState.voteGot[i] = true
-			rf.statusCond.Signal()
 			continue
 		}
 		go rf.sendRequestVote(i, args)
 	}
-	logrus.Debugf("term %v, peer %v become candidate", rf.currentTerm, rf.me)
 }
 
-func (rf *Raft) turnToLeader() {
-	rf.mu.Lock()
+func (rf *Raft) changeToLeader() {
+	logrus.Infof("%s -> leader", rf.desc())
 	rf.role = leader
 	rf.currentLeader = rf.me
 	if rf.leaderState == nil {
 		rf.leaderState = &LeaderState{
 			nextIndex:  make([]int, len(rf.peers)),
 			matchIndex: make([]int, len(rf.peers)),
-			appendEntry: make(chan struct{}),
+			lastHeartbeat: make([]int64, len(rf.peers)),
+			heartbeatCond: sync.NewCond(&rf.mu),
 		}
 	}
 	for i := range rf.leaderState.nextIndex {
 		rf.leaderState.nextIndex[i] = rf.getMonoIndex(len(rf.log))
 	}
-	rf.mu.Unlock()
 
 	for peerID := range rf.peers {
 		if peerID == rf.me {
@@ -548,12 +554,12 @@ func (rf *Raft) turnToLeader() {
 		}
 		go rf.syncLogEntriesTo(peerID)
 	}
-	logrus.Debugf("term %v, peer %v become leader", rf.currentTerm, rf.me)
 }
 
-func (rf *Raft) syncLogEntriesTo(pid int) {
+func (rf *Raft) syncLogEntriesTo(peerID int) {
 	rf.mu.Lock()
 	defer rf.mu.Unlock()
+	logrus.Debugf("%s syncLogEntriesTo %d start....", rf.desc(), peerID)
 
 	args := &AppendEntryArgs{
 		Term:         rf.currentTerm,
@@ -563,34 +569,39 @@ func (rf *Raft) syncLogEntriesTo(pid int) {
 	args.PrevLogTerm, args.PrevLogIndex = rf.lastLogTermIndex()
 	reply := new(AppendEntryReply)
 	for {
-		if rf.role != leader {
-			logrus.Warnf("ready to call AppendEntry, but role is %v", rf.role)
-			break
-		}
+		rf.leaderState.lastHeartbeat[peerID] = nowUnixNano()
 		rf.mu.Unlock()
-		ok := rf.peers[pid].Call("Raft.AppendEntry", args, reply)
+		ok := rf.peers[peerID].Call("Raft.AppendEntry", args, reply)
 		rf.mu.Lock()
 		if !ok {
-			logrus.Debugf("AppendEntry to peer %d failed", pid)
+			logrus.Debugf("%s AppendEntry to peer %d failed", rf.desc(), peerID)
 			continue
 		}
+		if rf.role != leader {
+			logrus.Debugf("%s syncLogEntriesTo end: not leader after AppendEntry", rf.desc())
+			break
+		}
+		if reply.Term < rf.currentTerm {
+			logrus.Debugf("%s syncLogEntriesTo end: stale goroutine. reply.Term=%v", rf.desc(), reply.Term)
+			break
+		}
 		if reply.Term > rf.currentTerm {
-			rf.currentTerm = reply.Term
-			rf.biggerTermFound = true
-			rf.statusCond.Signal()
+			logrus.Debugf("%s syncLogEntriesTo end: reply.Term=%v", rf.desc(), reply.Term)
+			rf.changeToFollower(reply.Term)
 			break
 		}
 		if reply.Success {
-			rf.leaderState.nextIndex[pid] = args.PrevLogIndex + len(args.Entries) + 1
-			rf.leaderState.matchIndex[pid] = args.PrevLogIndex + len(args.Entries)
+			rf.leaderState.nextIndex[peerID] = args.PrevLogIndex + len(args.Entries) + 1
+			rf.leaderState.matchIndex[peerID] = args.PrevLogIndex + len(args.Entries)
 			rf.checkCommit()
 
-			rf.mu.Unlock()
-			<- rf.leaderState.appendEntry
-			rf.mu.Lock()
-			rf.leaderState.nextHeartbeat = nowUnixNano() + heartbeatIntv
+			rf.waitHeartbeatLocked(peerID)
+			if rf.role != leader {
+				logrus.Debugf("%s syncLogEntriesTo end: not leader after waitHeartbeatLocked", rf.desc())
+				break
+			}
 
-			lastMatch := rf.leaderState.matchIndex[pid]
+			lastMatch := rf.leaderState.matchIndex[peerID]
 			lastMatchTerm := -1
 			if lastMatch >= 0 {
 				t := rf.getTermByMonoIndex(lastMatch)
@@ -620,7 +631,7 @@ func (rf *Raft) syncLogEntriesTo(pid int) {
 				ri := rf.findEntryWithTerm(args.PrevLogIndex, args.PrevLogTerm)
 				if ri <= -1 {
 					// TODO howZ: 可能是leader的entry 已经apply，所以找不到，需要InstallSnapshot
-					logrus.Fatalf("need snapshot to peer %d", pid)
+					logrus.Fatalf("need snapshot to peer %d", peerID)
 				}
 				for ri--; ri >= 0; ri-- {
 					if rf.log[ri].Term != args.Term {
@@ -630,7 +641,7 @@ func (rf *Raft) syncLogEntriesTo(pid int) {
 				if ri == -1 {
 					if rf.snapshot.lastAppliedTerm == args.PrevLogTerm {
 						// TODO howZ: 可能是leader的entry 已经apply，所以找不到，需要InstallSnapshot
-						logrus.Fatalf("need snapshot to peer %d", pid)
+						logrus.Fatalf("need snapshot to peer %d", peerID)
 					} else {
 						args.PrevLogIndex = rf.snapshot.lastApplied
 						args.PrevLogTerm = rf.snapshot.lastAppliedTerm
@@ -647,19 +658,40 @@ func (rf *Raft) syncLogEntriesTo(pid int) {
 	}
 }
 
+func (rf *Raft) waitHeartbeatLocked(peerID int) {
+	for {
+		if !rf.syncWith(peerID) {
+			logrus.Debugf("%s found new command, AppendEntry to %d", rf.desc(), peerID)
+			break
+		}
+		if nowUnixNano() - rf.leaderState.lastHeartbeat[peerID] > int64(heartbeatIntv) {
+			logrus.Debugf("%s prepare to send heartbeat to %d", rf.desc(), peerID)
+			break
+		}
+		rf.leaderState.heartbeatCond.Wait()
+	}
+}
+
 // outer lock
 func (rf *Raft) checkCommit() {
 	sortedMatch := make([]int, len(rf.leaderState.matchIndex))
 	copy(sortedMatch, rf.leaderState.matchIndex)
 	sort.Ints(sortedMatch)
-	i := len(sortedMatch)/2 - 1
-	if i < 0 { // case: len(sortedMatch)==1
-		i = 0
+
+	// len(sortedMatch) must > 0
+	// matchIndex 中位数作为 提交值
+	// 把 matchIndex 升序排序后，取中位数。若中位数有2个，应该取小的
+	middle := 0
+	if len(sortedMatch) % 2 == 0 {
+		middle = (len(sortedMatch)-1)/2
+	} else {
+		middle = len(sortedMatch)/2
 	}
-	newCommit := sortedMatch[i]
-	if newCommit > rf.commitIndex {
-		rf.commitIndex = newCommit
+	median := sortedMatch[middle]
+	if median > rf.commitIndex {
+		rf.commitIndex = median
 		rf.applyCond.Signal()
+		logrus.Infof("checkCommit: %s commit %d", rf.desc(), rf.commitIndex)
 	}
 }
 
@@ -708,56 +740,6 @@ func (rf *Raft) InstallSnapshot(args *InstallSnapshotArgs, reply *InstallSnapsho
 	// TODO howZ:
 }
 
-func (rf *Raft) onRoleFollower() raftRole {
-	var nextRole raftRole
-
-	rf.statusCond.L.Lock()
-	for {
-		if nowUnixNano() > rf.elecTimeout { // 超时
-			nextRole = candidate
-			logrus.Debugf("follower %v timeout", rf.me)
-			break
-		}
-		rf.statusCond.Wait()
-	}
-	rf.statusCond.L.Unlock()
-
-	return nextRole
-}
-
-func (rf *Raft) onRoleCandidate() raftRole {
-	var nextRole raftRole
-
-	rf.statusCond.L.Lock()
-	for {
-		if rf.biggerTermFound {
-			rf.biggerTermFound = false
-			nextRole = follower
-			logrus.Debugf("candidate %v update term, currentTerm=%v", rf.me, rf.currentTerm)
-			break
-		}
-		if rf.candidateState.failedOnThisTerm {
-			nextRole = follower
-			logrus.Debugf("candidate %v failed, currentTerm=%v", rf.me, rf.currentTerm)
-			break
-		}
-		if nowUnixNano() > rf.elecTimeout {
-			nextRole = candidate
-			logrus.Debugf("candidate %v timeout", rf.me)
-			break
-		}
-		if rf.gotMajorityVote() {
-			nextRole = leader
-			logrus.Debugf("candidate %v got majority vote", rf.me)
-			break
-		}
-		rf.statusCond.Wait()
-	}
-	rf.statusCond.L.Unlock()
-
-	return nextRole
-}
-
 func (rf *Raft) gotMajorityVote() bool {
 	count := 0
 	for _, got := range rf.candidateState.voteGot {
@@ -766,23 +748,6 @@ func (rf *Raft) gotMajorityVote() bool {
 		}
 	}
 	return count > len(rf.candidateState.voteGot)/2
-}
-
-func (rf *Raft) onRoleLeader() raftRole {
-	var nextRole raftRole
-
-	rf.statusCond.L.Lock()
-	for {
-		if rf.biggerTermFound {
-			rf.biggerTermFound = false
-			nextRole = follower
-			break
-		}
-		rf.statusCond.Wait()
-	}
-	rf.statusCond.L.Unlock()
-
-	return nextRole
 }
 
 func nowUnixNano() int64 {
@@ -816,10 +781,9 @@ func Make(peers []*labrpc.ClientEnd, me int,
 		lastAppliedTerm: -1,
 	}
 	rf.rand = rand.New(rand.NewSource(time.Now().UnixNano()))
-	rf.statusCond = sync.NewCond(&rf.mu)
 	rf.applyCond = sync.NewCond(&rf.mu)
 
-	go rf.StatusMachineRun()
+	rf.changeToFollower(1)
 	go rf.ContinuousApplyTo(applyCh)
 	go rf.ticker()
 
@@ -847,14 +811,14 @@ func (rf *Raft) ContinuousApplyTo(applyCh chan ApplyMsg) {
 			}
 			msg.CommandValid = true
 			msg.Command = rf.log[0].Cmd
-			msg.CommandIndex = rf.snapshot.lastApplied+1
+			msg.CommandIndex = rf.snapshot.lastApplied + 1
 			rf.mu.Unlock()
 
 			applyCh <- msg
 
 			rf.mu.Lock()
 			rf.snapshot.lastApplied++
-			rf.log = rf.log[1:] // fixme howz: memory leak
+			rf.log = rf.log[1:] // fixme howZ: memory leak
 			rf.mu.Unlock()
 		}
 	}
