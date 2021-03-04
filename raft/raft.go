@@ -85,35 +85,36 @@ type Raft struct {
 	currentLeader   int
 	role            raftRole
 	commitIndex     int
+	lastApplied     int
 	elecTimeout     int64
 	rand            *rand.Rand
 	biggerTermFound bool
 	statusCond      *sync.Cond
 	applyCond       *sync.Cond
-	snapshot        Snapshot
+	snapshotMeta    Snapshot
 
 	candidateState *CandidateState
 	leaderState    *LeaderState
 }
 
 type Snapshot struct {
-	lastApplied     int
-	lastAppliedTerm int
+	lastIncluded    int
+	lastIncludeTerm int
 }
 
 type LeaderState struct {
-	nextIndex  []int
-	matchIndex []int
+	nextIndex     []int
+	matchIndex    []int
 	heartbeatCond *sync.Cond
 	lastHeartbeat []int64
 }
 
 type CandidateState struct {
-	voteGot          []bool
+	voteGot []bool
 }
 
 func (l *LeaderState) needHeartbeat(peerID int) bool {
-	return nowUnixNano() - l.lastHeartbeat[peerID] > int64(heartbeatIntv)
+	return nowUnixNano()-l.lastHeartbeat[peerID] > int64(heartbeatIntv)
 }
 
 // outer lock
@@ -126,6 +127,10 @@ func (rf *Raft) ticker() {
 	const tickInterval = time.Millisecond
 	for {
 		<-time.After(tickInterval)
+		if rf.killed() {
+			break
+		}
+
 		rf.mu.Lock()
 		if nowUnixNano() > rf.elecTimeout {
 			if rf.role != leader {
@@ -204,6 +209,7 @@ type RequestVoteArgs struct {
 	CandidateID  int
 	LastLogIndex int
 	LastLogTerm  int
+	Debug 		 DebugData
 }
 
 //
@@ -225,10 +231,10 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 	if args.Term > rf.currentTerm {
 		// only vote for candidate whose log is at least as up-to-date as this log
 		lastLogTerm, lastLogIdx := rf.lastLogTermIndex()
-		if args.LastLogTerm >= lastLogTerm && args.LastLogIndex >= lastLogIdx {
+		if args.LastLogTerm > lastLogTerm || (args.LastLogTerm == lastLogTerm && args.LastLogIndex >= lastLogIdx) {
 			reply.VoteGranted = true
-			rf.currentTerm = args.Term
 			rf.votedFor = args.CandidateID
+			rf.changeToFollower(args.Term)
 		}
 	} else if args.Term == rf.currentTerm && rf.votedFor == args.CandidateID {
 		reply.VoteGranted = true
@@ -240,13 +246,13 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 func (rf *Raft) lastLogTermIndex() (term, idx int) {
 	lenLog := len(rf.log)
 	if lenLog == 0 {
-		term, idx = rf.snapshot.lastAppliedTerm, rf.snapshot.lastApplied
+		term, idx = rf.snapshotMeta.lastIncludeTerm, rf.snapshotMeta.lastIncluded
 		return
 	}
 
 	lastLog := rf.log[lenLog-1]
 	term = lastLog.Term
-	idx = rf.snapshot.lastApplied + lenLog
+	idx = rf.snapshotMeta.lastIncluded + lenLog
 	return
 }
 
@@ -257,12 +263,19 @@ type AppendEntryArgs struct {
 	PrevLogTerm  int
 	Entries      []*labrpc.LogEntry
 	LeaderCommit int
+	Debug        DebugData
 }
 
 type AppendEntryReply struct {
 	Term            int
 	Success         bool
 	LastIndexOfTerm int
+}
+
+type DebugData struct {
+	CreateTs int64
+	Caller   int
+	Called   int
 }
 
 func (rf *Raft) AppendEntry(args *AppendEntryArgs, reply *AppendEntryReply) {
@@ -279,25 +292,28 @@ func (rf *Raft) AppendEntry(args *AppendEntryArgs, reply *AppendEntryReply) {
 	if rf.role == follower {
 		rf.resetTimeout()
 	}
-	if args.Term >= rf.currentTerm {
-		if rf.role == candidate || rf.role == leader {
-			rf.changeToFollower(args.Term)
-		}
+	if args.Term >= rf.currentTerm && rf.role != follower {
+		rf.changeToFollower(args.Term)
 	}
 
-	var start int
-	if args.PrevLogIndex < 0 {
-		start = 0 // leader同步第一个LogEntry，前面没有LogEntry
-	} else {
-		start = rf.findEntryWithTerm(args.PrevLogIndex, args.PrevLogTerm) + 1 // 从log中的start开始合并
+	var start int // 从log中的start开始合并
+	if args.PrevLogIndex > 0 {
+		start = rf.findEntryWithTerm(args.PrevLogIndex, args.PrevLogTerm) + 1
 	}
 	if start < 0 {
 		reply.Success = false
 		reply.LastIndexOfTerm = rf.lastIndexOfTerm(args.PrevLogTerm)
+		logrus.Debugf("%s exec AppendEntry, log=%v", rf.desc(), rf.logString())
 		return
 	}
+	commit := min(args.LeaderCommit, args.PrevLogIndex+len(args.Entries)) // 只能提交leader已经提交，且肯定与leader匹配的部分LogEntry
+	if commit > rf.commitIndex {
+		logrus.Debugf("%s committing %v, log=%s, start=%v", rf.desc(), commit, rf.logString(), start)
+		rf.commitIndex = commit
+		rf.applyCond.Signal()
+	}
+	reply.Success = true
 	if len(args.Entries) == 0 {
-		reply.Success = true
 		return
 	}
 	for i, entry := range args.Entries {
@@ -311,11 +327,21 @@ func (rf *Raft) AppendEntry(args *AppendEntryArgs, reply *AppendEntryReply) {
 			break
 		}
 	}
-	if args.LeaderCommit > rf.commitIndex {
-		rf.commitIndex = args.LeaderCommit
-		rf.applyCond.Signal()
+	if len(rf.log) > snapshotTriggerCond {
+		rf.snapshot()
 	}
-	reply.Success = true
+}
+
+func (rf *Raft) logString() string {
+	s := ""
+	for i, e := range rf.log {
+		s += fmt.Sprintf("%d{term=%v,cmd=%v}, ", i, e.Term, e.Cmd)
+	}
+	return s
+}
+
+func (rf *Raft) printLog() {
+	logrus.Debugf("%s printLog, log=%v", rf.desc(), rf.logString())
 }
 
 func (rf *Raft) desc() string {
@@ -327,35 +353,42 @@ func (rf *Raft) desc() string {
 // 返回值等于 -1， 时代表刚好是上一个apply的条目
 // outer lock
 func (rf *Raft) findEntryWithTerm(idx, term int) int {
-	realIndex := (idx - rf.snapshot.lastApplied) - 1
+	realIndex := (idx - rf.snapshotMeta.lastIncluded) - 1
 	if realIndex >= len(rf.log) {
 		return -2
 	}
-	if realIndex == -1 && term != rf.snapshot.lastAppliedTerm {
+	if realIndex == -1 && term != rf.snapshotMeta.lastIncludeTerm {
+		realIndex = -2
+	}
+	if realIndex >= 0 && rf.log[realIndex].Term != term {
 		realIndex = -2
 	}
 	return realIndex
 }
 
 func (rf *Raft) findEntry(idx int) *labrpc.LogEntry {
-	realIndex := (idx - rf.snapshot.lastApplied) - 1
+	realIndex := rf.getRealIndex(idx)
 	if realIndex < 0 || realIndex >= len(rf.log) {
 		return nil
 	}
 	return rf.log[realIndex]
 }
 
+func (rf *Raft) getRealIndex(monoIdx int) int {
+	return (monoIdx - rf.snapshotMeta.lastIncluded) - 1
+}
+
 // 查找某个term的末尾entry，返回其单增索引. 找不到则返回 -1
 func (rf *Raft) lastIndexOfTerm(t int) int {
-	idx := -1
+	idx := 0
 	for i := len(rf.log) - 1; i >= 0; i-- {
 		if rf.log[i].Term == t {
 			idx = rf.getMonoIndex(i)
 			break
 		}
 	}
-	if idx < 0 && rf.snapshot.lastAppliedTerm == t {
-		idx = rf.snapshot.lastApplied
+	if idx == 0 && rf.snapshotMeta.lastIncludeTerm == t {
+		idx = rf.snapshotMeta.lastIncluded
 	}
 	return idx
 }
@@ -364,7 +397,7 @@ func (rf *Raft) getMonoIndex(ri int) int {
 	if ri < 0 {
 		panic(fmt.Sprintf("getMonoIndex: ri=%v", ri))
 	}
-	return rf.snapshot.lastApplied + ri + 1
+	return rf.snapshotMeta.lastIncluded + ri + 1
 }
 
 //
@@ -401,6 +434,9 @@ func (rf *Raft) sendRequestVote(server int, args *RequestVoteArgs) {
 	ok := rf.peers[server].Call("Raft.RequestVote", args, reply)
 	if !ok {
 		logrus.Debugf("sendRequestVote to peer %d failed", server)
+		return
+	}
+	if rf.killed() {
 		return
 	}
 
@@ -453,6 +489,7 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 	if rf.role != leader {
 		return index, term, false
 	}
+	logrus.Debugf("%s Start(%v)", rf.desc(), command)
 	rf.log = append(rf.log, &labrpc.LogEntry{
 		Term: rf.currentTerm,
 		Cmd:  command,
@@ -460,6 +497,10 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 	term, index = rf.lastLogTermIndex()
 	rf.leaderState.matchIndex[rf.me] = index
 	rf.leaderState.heartbeatCond.Broadcast()
+
+	if len(rf.log) > snapshotTriggerCond {
+		rf.snapshot()
+	}
 	return index, term, true
 }
 
@@ -519,15 +560,20 @@ func (rf *Raft) initiateNewElection() {
 		return
 	}
 
-	args := &RequestVoteArgs{
-		Term:        rf.currentTerm,
-		CandidateID: rf.me,
-	}
-	args.LastLogTerm, args.LastLogIndex = rf.lastLogTermIndex()
 	for i := range rf.peers {
 		if i == rf.me {
 			continue
 		}
+		args := &RequestVoteArgs{
+			Term:        rf.currentTerm,
+			CandidateID: rf.me,
+			Debug:DebugData{
+				CreateTs: nowUnixNano(),
+				Caller:   rf.me,
+				Called:   i,
+			},
+		}
+		args.LastLogTerm, args.LastLogIndex = rf.lastLogTermIndex()
 		go rf.sendRequestVote(i, args)
 	}
 }
@@ -538,8 +584,8 @@ func (rf *Raft) changeToLeader() {
 	rf.currentLeader = rf.me
 	if rf.leaderState == nil {
 		rf.leaderState = &LeaderState{
-			nextIndex:  make([]int, len(rf.peers)),
-			matchIndex: make([]int, len(rf.peers)),
+			nextIndex:     make([]int, len(rf.peers)),
+			matchIndex:    make([]int, len(rf.peers)),
 			lastHeartbeat: make([]int64, len(rf.peers)),
 			heartbeatCond: sync.NewCond(&rf.mu),
 		}
@@ -558,38 +604,52 @@ func (rf *Raft) changeToLeader() {
 
 func (rf *Raft) syncLogEntriesTo(peerID int) {
 	rf.mu.Lock()
-	defer rf.mu.Unlock()
 	logrus.Debugf("%s syncLogEntriesTo %d start....", rf.desc(), peerID)
 
 	args := &AppendEntryArgs{
 		Term:         rf.currentTerm,
 		LeaderID:     rf.me,
 		LeaderCommit: rf.commitIndex,
+		Debug:DebugData{
+			Caller: rf.me,
+			Called: peerID,
+		},
 	}
 	args.PrevLogTerm, args.PrevLogIndex = rf.lastLogTermIndex()
-	reply := new(AppendEntryReply)
 	for {
 		rf.leaderState.lastHeartbeat[peerID] = nowUnixNano()
+
 		rf.mu.Unlock()
+		args.Debug.CreateTs = nowUnixNano()
+		reply := &AppendEntryReply{}
 		ok := rf.peers[peerID].Call("Raft.AppendEntry", args, reply)
+		if rf.killed() {
+			return
+		}
 		rf.mu.Lock()
+
+		// retry
 		if !ok {
 			logrus.Debugf("%s AppendEntry to peer %d failed", rf.desc(), peerID)
 			continue
 		}
+		// not leader, stop syncing
 		if rf.role != leader {
 			logrus.Debugf("%s syncLogEntriesTo end: not leader after AppendEntry", rf.desc())
 			break
 		}
-		if reply.Term < rf.currentTerm {
+		// stale goroutine
+		if args.Term < rf.currentTerm {
 			logrus.Debugf("%s syncLogEntriesTo end: stale goroutine. reply.Term=%v", rf.desc(), reply.Term)
 			break
 		}
+		// peer in bigger term found
 		if reply.Term > rf.currentTerm {
 			logrus.Debugf("%s syncLogEntriesTo end: reply.Term=%v", rf.desc(), reply.Term)
 			rf.changeToFollower(reply.Term)
 			break
 		}
+
 		if reply.Success {
 			rf.leaderState.nextIndex[peerID] = args.PrevLogIndex + len(args.Entries) + 1
 			rf.leaderState.matchIndex[peerID] = args.PrevLogIndex + len(args.Entries)
@@ -600,51 +660,52 @@ func (rf *Raft) syncLogEntriesTo(peerID int) {
 				logrus.Debugf("%s syncLogEntriesTo end: not leader after waitHeartbeatLocked", rf.desc())
 				break
 			}
+			// TODO howz: 需要check stale goroutine？ killed？
 
 			lastMatch := rf.leaderState.matchIndex[peerID]
-			lastMatchTerm := -1
-			if lastMatch >= 0 {
-				t := rf.getTermByMonoIndex(lastMatch)
-				if t < 0 {
-					// TODO howZ: 需要InstallSnapshot
-				}
-				lastMatchTerm = t
+			lastMatchTerm := rf.getTermByMonoIndex(lastMatch)
+			if lastMatch > 0 && lastMatchTerm == 0 {
+				logrus.Debugf("%s syncLogEntriesTo: lastMatch=%v, lastMatchTerm=%v, matchIndex=%v, commitIndex=%v, lastIncluded=%v",
+					rf.desc(), lastMatch, lastMatchTerm, rf.leaderState.matchIndex, rf.commitIndex, rf.snapshotMeta.lastIncluded)
+				rf.sendSnapshotTo(peerID)
 			}
 			args.PrevLogIndex = lastMatch
 			args.PrevLogTerm = lastMatchTerm
 			args.LeaderCommit = rf.commitIndex
-			args.Entries = rf.log[rf.findEntryWithTerm(lastMatch, lastMatchTerm)+1:]
+			if lastMatch == 0 {
+				args.Entries = rf.log
+			} else {
+				args.Entries = rf.log[rf.findEntryWithTerm(lastMatch, lastMatchTerm)+1:]
+			}
 			continue
 		} else {
-			if reply.LastIndexOfTerm >= 0 {
-				ri := rf.findEntryWithTerm(reply.LastIndexOfTerm, args.Term)
+			// 快速定位match位置
+			if reply.LastIndexOfTerm > 0 {
+				// 直接定位到对方的args.PrevLogTerm的最后一条的LogEntry
+				ri := rf.findEntryWithTerm(reply.LastIndexOfTerm, args.PrevLogTerm)
 				if ri < -1 {
-					// TODO howZ: 可能是leader的entry 已经apply，所以找不到，需要InstallSnapshot
-					logrus.Fatalf("syncLogEntriesTo: raft do not have entry index=%v, term=%v", reply.LastIndexOfTerm, args.Term)
+					logrus.Debugf("%s findEntryWithTerm(%v, %v) failed, log=%v", rf.desc(), reply.LastIndexOfTerm, args.PrevLogTerm, rf.logString())
+					rf.sendSnapshotTo(peerID)
 				}
-				args.Term = rf.currentTerm
 				args.LeaderCommit = rf.commitIndex
-				args.PrevLogTerm, args.PrevLogIndex = args.Term, reply.LastIndexOfTerm
+				args.PrevLogIndex = reply.LastIndexOfTerm
 				args.Entries = rf.log[ri+1:]
 				continue
 			} else {
-				ri := rf.findEntryWithTerm(args.PrevLogIndex, args.PrevLogTerm)
-				if ri <= -1 {
-					// TODO howZ: 可能是leader的entry 已经apply，所以找不到，需要InstallSnapshot
-					logrus.Fatalf("need snapshot to peer %d", peerID)
-				}
-				for ri--; ri >= 0; ri-- {
-					if rf.log[ri].Term != args.Term {
+				// 查找最后一条term小于args.PrevLogTerm的LogEntry
+				ri := len(rf.log)-1
+				for ; ri >= 0; ri-- {
+					if rf.log[ri].Term < args.PrevLogTerm {
 						break
 					}
 				}
 				if ri == -1 {
-					if rf.snapshot.lastAppliedTerm == args.PrevLogTerm {
-						// TODO howZ: 可能是leader的entry 已经apply，所以找不到，需要InstallSnapshot
-						logrus.Fatalf("need snapshot to peer %d", peerID)
+					if rf.snapshotMeta.lastIncludeTerm == args.PrevLogTerm {
+						logrus.Debugf("%s snapshotMeta=%+v, args=%+v", rf.desc(), rf.snapshotMeta, args)
+						rf.sendSnapshotTo(peerID)
 					} else {
-						args.PrevLogIndex = rf.snapshot.lastApplied
-						args.PrevLogTerm = rf.snapshot.lastAppliedTerm
+						args.PrevLogIndex = rf.snapshotMeta.lastIncluded
+						args.PrevLogTerm = rf.snapshotMeta.lastIncludeTerm
 						args.Entries = rf.log
 						continue
 					}
@@ -656,6 +717,14 @@ func (rf *Raft) syncLogEntriesTo(peerID int) {
 			}
 		}
 	}
+	rf.mu.Unlock()
+}
+
+func (rf *Raft) sendSnapshotTo(peerID int) {
+	// TODO howZ
+	logrus.Debugf("need snapshot to peer %d", peerID)
+	rf.printLog()
+	panic("snapshot")
 }
 
 func (rf *Raft) waitHeartbeatLocked(peerID int) {
@@ -664,7 +733,7 @@ func (rf *Raft) waitHeartbeatLocked(peerID int) {
 			logrus.Debugf("%s found new command, AppendEntry to %d", rf.desc(), peerID)
 			break
 		}
-		if nowUnixNano() - rf.leaderState.lastHeartbeat[peerID] > int64(heartbeatIntv) {
+		if nowUnixNano()-rf.leaderState.lastHeartbeat[peerID] > int64(heartbeatIntv) {
 			logrus.Debugf("%s prepare to send heartbeat to %d", rf.desc(), peerID)
 			break
 		}
@@ -682,10 +751,10 @@ func (rf *Raft) checkCommit() {
 	// matchIndex 中位数作为 提交值
 	// 把 matchIndex 升序排序后，取中位数。若中位数有2个，应该取小的
 	middle := 0
-	if len(sortedMatch) % 2 == 0 {
-		middle = (len(sortedMatch)-1)/2
+	if len(sortedMatch)%2 == 0 {
+		middle = (len(sortedMatch) - 1) / 2
 	} else {
-		middle = len(sortedMatch)/2
+		middle = len(sortedMatch) / 2
 	}
 	median := sortedMatch[middle]
 	if median > rf.commitIndex {
@@ -695,18 +764,20 @@ func (rf *Raft) checkCommit() {
 	}
 }
 
+// 查找MonoIndex对应Entry的Term
+// 没找到Entry则返回0
 func (rf *Raft) getTermByMonoIndex(mi int) int {
-	if mi < 0 {
-		panic(fmt.Sprintf("getTermByMonoIndex: mi %d", mi))
+	if mi <= 0 {
+		return 0
 	}
 
 	if e := rf.findEntry(mi); e != nil {
 		return e.Term
 	}
-	if mi == rf.snapshot.lastApplied {
-		return rf.snapshot.lastAppliedTerm
+	if mi == rf.snapshotMeta.lastIncluded {
+		return rf.snapshotMeta.lastIncludeTerm
 	}
-	return -1
+	return 0
 }
 
 func (rf *Raft) syncWith(pid int) bool {
@@ -725,7 +796,7 @@ func (rf *Raft) getPreEntry(i, t int) (int, int) {
 		return ri, -1
 	}
 	if ri == 0 {
-		return rf.snapshot.lastApplied, rf.snapshot.lastAppliedTerm
+		return rf.snapshotMeta.lastIncluded, rf.snapshotMeta.lastIncludeTerm
 	}
 	return rf.getMonoIndex(ri - 1), rf.log[ri-1].Term
 }
@@ -776,50 +847,57 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	rf.readPersist(persister.ReadRaftState())
 
 	// Your initialization code here (2A, 2B, 2C).
-	rf.snapshot = Snapshot{
-		lastApplied:     -1,
-		lastAppliedTerm: -1,
-	}
 	rf.rand = rand.New(rand.NewSource(time.Now().UnixNano()))
 	rf.applyCond = sync.NewCond(&rf.mu)
 
-	rf.changeToFollower(1)
-	go rf.ContinuousApplyTo(applyCh)
+	rf.changeToFollower(0)
+	go rf.applyDamon(applyCh)
 	go rf.ticker()
 
 	return rf
 }
 
-func (rf *Raft) ContinuousApplyTo(applyCh chan ApplyMsg) {
-	var i int
-	var msg ApplyMsg
+func (rf *Raft) applyDamon(applyCh chan ApplyMsg) {
+	rf.mu.Lock()
+	defer rf.mu.Unlock()
+
 	for {
-		rf.applyCond.L.Lock()
-		for rf.snapshot.lastApplied == rf.commitIndex || len(rf.log) == 0 {
+		for rf.lastApplied == rf.commitIndex {
 			rf.applyCond.Wait()
 		}
-		rf.applyCond.L.Unlock()
+		if rf.killed() {
+			break
+		}
 
-		rf.mu.Lock()
-		i = rf.commitIndex - rf.snapshot.lastApplied
-		rf.mu.Unlock()
-		for ; i > 0; i-- {
-			rf.mu.Lock()
-			if len(rf.log) == 0 {
-				rf.mu.Unlock()
+		for rf.lastApplied < rf.commitIndex {
+			rf.lastApplied++
+			msg := ApplyMsg{
+				CommandValid: true,
+				Command:      rf.log[rf.getRealIndex(rf.lastApplied)].Cmd,
+				CommandIndex: rf.lastApplied,
+			}
+			logrus.Debugf("%s applying msg=%+v", rf.desc(), msg)
+			rf.mu.Unlock()
+			applyCh <- msg
+			if rf.killed() {
 				break
 			}
-			msg.CommandValid = true
-			msg.Command = rf.log[0].Cmd
-			msg.CommandIndex = rf.snapshot.lastApplied + 1
-			rf.mu.Unlock()
-
-			applyCh <- msg
-
 			rf.mu.Lock()
-			rf.snapshot.lastApplied++
-			rf.log = rf.log[1:] // fixme howZ: memory leak
-			rf.mu.Unlock()
+			logrus.Debugf("%s applied msg=%+v", rf.desc(), msg)
 		}
 	}
+}
+
+func (rf *Raft) snapshot() {
+	ri := rf.getRealIndex(rf.lastApplied)
+	if ri < 0 {
+		logrus.Debugf("%s snapshot failed, len=%d, ri=%d, lastApplied=%v", rf.desc(), len(rf.log), ri, rf.lastApplied)
+		return
+	}
+	// TODO howZ
+	//rf.persister.SaveStateAndSnapshot()
+}
+
+func (rf *Raft) Debug(content string) {
+	logrus.Debugf("%s %s", rf.desc(), content)
 }

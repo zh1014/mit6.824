@@ -18,13 +18,6 @@ import "math/rand"
 import "sync/atomic"
 import "sync"
 
-func TestLoop(t *testing.T) {
-	const loopTimes = 10
-	for i := 0; i < loopTimes; i ++ {
-		TestReElection2A(t)
-	}
-}
-
 // The tester generously allows solutions to complete elections in one second
 // (much more than the paper's range of timeouts).
 const RaftElectionTimeout = 1000 * time.Millisecond
@@ -349,6 +342,7 @@ loop:
 }
 
 func TestRejoin2B(t *testing.T) {
+	logConfig()
 	servers := 3
 	cfg := make_config(t, servers, false)
 	defer cfg.cleanup()
@@ -992,3 +986,21 @@ func TestReliableChurn2C(t *testing.T) {
 func TestUnreliableChurn2C(t *testing.T) {
 	internalChurn(t, true)
 }
+//
+//var global int
+//
+//func TestHowz1(t *testing.T) {
+//	if global > 0 {
+//		t.Fatalf("global=%v", global)
+//	}
+//	t.Logf("global=%v", global)
+//	global++
+//	t.Logf("global=%v", global)
+//}
+//
+//func TestHowz2(t *testing.T) {
+//	t.Logf("global=%v", global)
+//	if global > 0 {
+//		t.Fatalf("global=%v", global)
+//	}
+//}

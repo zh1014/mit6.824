@@ -434,6 +434,7 @@ func (cfg *config) wait(index int, n int, startTerm int) interface{} {
 // if retry==false, calls Start() only once, in order
 // to simplify the early Lab 2B tests.
 func (cfg *config) one(cmd interface{}, expectedServers int, retry bool) int {
+	logrus.Debugf("one(%v) start....", cmd)
 	t0 := time.Now()
 	starts := 0
 	for time.Since(t0).Seconds() < 10 {
@@ -466,11 +467,9 @@ func (cfg *config) one(cmd interface{}, expectedServers int, retry bool) int {
 					// committed
 					if cmd1 == cmd {
 						// and it was the command we submitted.
+						logrus.Debugf("one(%v) succeed!", cmd)
 						return index
 					}
-				}
-				if nd > 0 {
-					cfg.t.Logf("one(%v), nd=%v, cmd1=%v", cmd, nd, cmd1)
 				}
 				time.Sleep(20 * time.Millisecond)
 			}

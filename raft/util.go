@@ -25,4 +25,13 @@ func logConfig() {
 		}
 		logrus.SetOutput(f)
 	}
+	logrus.Infof("log ready....")
+}
+
+func min(i, j int) int {
+	if i < j {
+		return i
+	} else {
+		return j
+	}
 }
