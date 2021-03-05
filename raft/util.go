@@ -4,6 +4,7 @@ import (
 	"github.com/sirupsen/logrus"
 	"log"
 	"os"
+	"time"
 )
 
 // Debugging
@@ -34,4 +35,8 @@ func min(i, j int) int {
 	} else {
 		return j
 	}
+}
+
+func nowUnixNano() int64 {
+	return time.Now().UnixNano()
 }

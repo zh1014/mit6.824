@@ -66,33 +66,25 @@ func (r raftRole) String() string {
 	return roleString[r]
 }
 
-//
 // A Go object implementing a single Raft peer.
-//
 type Raft struct {
-	// Persistent state
-	currentTerm int
-	votedFor    int
-	log         []*labrpc.LogEntry
+	peers      []*labrpc.ClientEnd // RPC end points of all peers.
+	me         int                 // this peer's index into peers[]
+	persister  *Persister          // Object to hold this peer's persisted state
+	dead       int32               // set by Kill()
+	rand       *rand.Rand
+	statusCond *sync.Cond
+	applyCond  *sync.Cond
 
-	// Volatile state
-	peers     []*labrpc.ClientEnd // RPC end points of all peers.
-	me        int                 // this peer's index into peers[]
-	persister *Persister          // Object to hold this peer's persisted state
-	dead      int32               // set by Kill()
-
-	mu              sync.Mutex // Lock to protect shared access to this peer's follow state
-	currentLeader   int
-	role            raftRole
-	commitIndex     int
-	lastApplied     int
-	elecTimeout     int64
-	rand            *rand.Rand
-	biggerTermFound bool
-	statusCond      *sync.Cond
-	applyCond       *sync.Cond
-	snapshotMeta    Snapshot
-
+	mu             sync.Mutex // protect follow fields
+	currentTerm    int
+	role           raftRole
+	votedFor       int
+	elecTimeout    int64
+	log            []*labrpc.LogEntry
+	commitIndex    int
+	lastApplied    int
+	snapshotMeta   Snapshot
 	candidateState *CandidateState
 	leaderState    *LeaderState
 }
@@ -581,7 +573,6 @@ func (rf *Raft) initiateNewElection() {
 func (rf *Raft) changeToLeader() {
 	logrus.Infof("%s -> leader", rf.desc())
 	rf.role = leader
-	rf.currentLeader = rf.me
 	if rf.leaderState == nil {
 		rf.leaderState = &LeaderState{
 			nextIndex:     make([]int, len(rf.peers)),
@@ -811,11 +802,6 @@ func (rf *Raft) gotMajorityVote() bool {
 	return count > len(rf.candidateState.voteGot)/2
 }
 
-func nowUnixNano() int64 {
-	return time.Now().UnixNano()
-}
-
-//
 // the service or tester wants to create a Raft server. the ports
 // of all the Raft servers (including this one) are in peers[]. this
 // server's port is peers[me]. all the servers' peers[] arrays
@@ -825,25 +811,23 @@ func nowUnixNano() int64 {
 // tester or service expects Raft to send ApplyMsg messages.
 // Make() must return quickly, so it should start goroutines
 // for any long-running work.
-//
 func Make(peers []*labrpc.ClientEnd, me int,
 	persister *Persister, applyCh chan ApplyMsg) *Raft {
 	rf := &Raft{}
 	rf.peers = peers
 	rf.persister = persister
 	rf.me = me
-
-	// initialize from state persisted before a crash
-	rf.readPersist(persister.ReadRaftState())
-
-	// Your initialization code here (2A, 2B, 2C).
 	rf.rand = rand.New(rand.NewSource(time.Now().UnixNano()))
 	rf.applyCond = sync.NewCond(&rf.mu)
 
-	rf.changeToFollower(0)
+	if rawData := persister.ReadRaftState(); len(rawData) > 0 {
+		rf.readPersist(rawData)
+	} else {
+		rf.changeToFollower(0)
+	}
+
 	go rf.applyDamon(applyCh)
 	go rf.ticker()
-
 	return rf
 }
 
