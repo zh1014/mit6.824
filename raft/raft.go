@@ -209,7 +209,7 @@ type RequestVoteArgs struct {
 	CandidateID  int
 	LastLogIndex int
 	LastLogTerm  int
-	Debug 		 DebugData
+	Debug        DebugData
 }
 
 //
@@ -567,7 +567,7 @@ func (rf *Raft) initiateNewElection() {
 		args := &RequestVoteArgs{
 			Term:        rf.currentTerm,
 			CandidateID: rf.me,
-			Debug:DebugData{
+			Debug: DebugData{
 				CreateTs: nowUnixNano(),
 				Caller:   rf.me,
 				Called:   i,
@@ -606,19 +606,20 @@ func (rf *Raft) syncLogEntriesTo(peerID int) {
 	rf.mu.Lock()
 	logrus.Debugf("%s syncLogEntriesTo %d start....", rf.desc(), peerID)
 
+	// the first heartbeat announces the newly elected leader
 	args := &AppendEntryArgs{
-		Term:         rf.currentTerm,
-		LeaderID:     rf.me,
-		LeaderCommit: rf.commitIndex,
-		Debug:DebugData{
+		Term:     rf.currentTerm,
+		LeaderID: rf.me,
+		Debug: DebugData{
 			Caller: rf.me,
 			Called: peerID,
 		},
 	}
 	args.PrevLogTerm, args.PrevLogIndex = rf.lastLogTermIndex()
+
 	for {
 		rf.leaderState.lastHeartbeat[peerID] = nowUnixNano()
-
+		args.LeaderCommit = rf.commitIndex
 		rf.mu.Unlock()
 		args.Debug.CreateTs = nowUnixNano()
 		reply := &AppendEntryReply{}
@@ -650,78 +651,67 @@ func (rf *Raft) syncLogEntriesTo(peerID int) {
 			break
 		}
 
+		var realIndexMatch int // 下一个可能match的位置
 		if reply.Success {
 			rf.leaderState.nextIndex[peerID] = args.PrevLogIndex + len(args.Entries) + 1
 			rf.leaderState.matchIndex[peerID] = args.PrevLogIndex + len(args.Entries)
 			rf.checkCommit()
 
 			rf.waitHeartbeatLocked(peerID)
+			if rf.killed() {
+				break
+			}
 			if rf.role != leader {
 				logrus.Debugf("%s syncLogEntriesTo end: not leader after waitHeartbeatLocked", rf.desc())
 				break
 			}
-			// TODO howz: 需要check stale goroutine？ killed？
+			// stale goroutine
+			if args.Term < rf.currentTerm {
+				logrus.Debugf("%s syncLogEntriesTo end: stale goroutine. reply.Term=%v", rf.desc(), reply.Term)
+				break
+			}
 
-			lastMatch := rf.leaderState.matchIndex[peerID]
-			lastMatchTerm := rf.getTermByMonoIndex(lastMatch)
-			if lastMatch > 0 && lastMatchTerm == 0 {
-				logrus.Debugf("%s syncLogEntriesTo: lastMatch=%v, lastMatchTerm=%v, matchIndex=%v, commitIndex=%v, lastIncluded=%v",
-					rf.desc(), lastMatch, lastMatchTerm, rf.leaderState.matchIndex, rf.commitIndex, rf.snapshotMeta.lastIncluded)
-				rf.sendSnapshotTo(peerID)
-			}
-			args.PrevLogIndex = lastMatch
-			args.PrevLogTerm = lastMatchTerm
-			args.LeaderCommit = rf.commitIndex
-			if lastMatch == 0 {
-				args.Entries = rf.log
-			} else {
-				args.Entries = rf.log[rf.findEntryWithTerm(lastMatch, lastMatchTerm)+1:]
-			}
-			continue
+			realIndexMatch = rf.getRealIndex(rf.leaderState.matchIndex[peerID])
 		} else {
-			// 快速定位match位置
-			if reply.LastIndexOfTerm > 0 {
-				// 直接定位到对方的args.PrevLogTerm的最后一条的LogEntry
-				ri := rf.findEntryWithTerm(reply.LastIndexOfTerm, args.PrevLogTerm)
-				if ri < -1 {
-					logrus.Debugf("%s findEntryWithTerm(%v, %v) failed, log=%v", rf.desc(), reply.LastIndexOfTerm, args.PrevLogTerm, rf.logString())
-					rf.sendSnapshotTo(peerID)
-				}
-				args.LeaderCommit = rf.commitIndex
-				args.PrevLogIndex = reply.LastIndexOfTerm
-				args.Entries = rf.log[ri+1:]
-				continue
-			} else {
-				// 查找最后一条term小于args.PrevLogTerm的LogEntry
-				ri := len(rf.log)-1
-				for ; ri >= 0; ri-- {
-					if rf.log[ri].Term < args.PrevLogTerm {
-						break
-					}
-				}
-				if ri == -1 {
-					if rf.snapshotMeta.lastIncludeTerm == args.PrevLogTerm {
-						logrus.Debugf("%s snapshotMeta=%+v, args=%+v", rf.desc(), rf.snapshotMeta, args)
-						rf.sendSnapshotTo(peerID)
-					} else {
-						args.PrevLogIndex = rf.snapshotMeta.lastIncluded
-						args.PrevLogTerm = rf.snapshotMeta.lastIncludeTerm
-						args.Entries = rf.log
-						continue
-					}
-				}
-				args.PrevLogIndex = rf.getMonoIndex(ri)
-				args.PrevLogTerm = rf.log[ri].Term
-				args.Entries = rf.log[ri+1:]
-				continue
-			}
+			realIndexMatch = rf.findMatchQuickly(args, reply)
 		}
+		if realIndexMatch <= realIndexInvalid {
+			rf.sendSnapshotTo(peerID)
+		}
+		if realIndexMatch == realIndexLastApplied {
+			args.PrevLogIndex = rf.snapshotMeta.lastIncluded
+			args.PrevLogTerm = rf.snapshotMeta.lastIncludeTerm
+		} else {
+			args.PrevLogIndex = rf.getMonoIndex(realIndexMatch)
+			args.PrevLogTerm = rf.log[realIndexMatch].Term
+		}
+		args.Entries = rf.log[realIndexMatch+1:]
 	}
 	rf.mu.Unlock()
 }
 
+func (rf *Raft) findMatchQuickly(args *AppendEntryArgs, reply *AppendEntryReply) int {
+	var realIndex int
+	if reply.LastIndexOfTerm > 0 {
+		// 快速获取match位置. 直接定位到对方的args.PrevLogTerm的最后一条的LogEntry
+		realIndex = rf.findEntryWithTerm(reply.LastIndexOfTerm, args.PrevLogTerm)
+	} else {
+		// 获取可能match的位置. 获取最后一条term小于args.PrevLogTerm的LogEntry
+		realIndex = len(rf.log) - 1
+		for ; realIndex >= 0; realIndex-- {
+			if rf.log[realIndex].Term < args.PrevLogTerm {
+				break
+			}
+		}
+		if realIndex == -1 && rf.snapshotMeta.lastIncludeTerm == args.PrevLogTerm {
+			realIndex--
+		}
+	}
+	return realIndex
+}
+
 func (rf *Raft) sendSnapshotTo(peerID int) {
-	// TODO howZ
+	// TODO howz
 	logrus.Debugf("need snapshot to peer %d", peerID)
 	rf.printLog()
 	panic("snapshot")
