@@ -22,6 +22,13 @@ import "sync"
 // (much more than the paper's range of timeouts).
 const RaftElectionTimeout = 1000 * time.Millisecond
 
+func TestLoop(t *testing.T) {
+	const loop = 10
+	for i := 0; i< loop; i++ {
+		TestFigure8Unreliable2C(t)
+	}
+}
+
 func TestInitialElection2A(t *testing.T) {
 	logConfig()
 	servers := 3
@@ -563,6 +570,7 @@ loop:
 }
 
 func TestPersist12C(t *testing.T) {
+	logConfig()
 	servers := 3
 	cfg := make_config(t, servers, false)
 	defer cfg.cleanup()
@@ -609,6 +617,7 @@ func TestPersist12C(t *testing.T) {
 }
 
 func TestPersist22C(t *testing.T) {
+	logConfig()
 	servers := 5
 	cfg := make_config(t, servers, false)
 	defer cfg.cleanup()
@@ -655,6 +664,7 @@ func TestPersist22C(t *testing.T) {
 }
 
 func TestPersist32C(t *testing.T) {
+	logConfig()
 	servers := 3
 	cfg := make_config(t, servers, false)
 	defer cfg.cleanup()
@@ -695,6 +705,7 @@ func TestPersist32C(t *testing.T) {
 // haven't been committed yet.
 //
 func TestFigure82C(t *testing.T) {
+	logConfig()
 	servers := 5
 	cfg := make_config(t, servers, false)
 	defer cfg.cleanup()
@@ -751,6 +762,7 @@ func TestFigure82C(t *testing.T) {
 }
 
 func TestUnreliableAgree2C(t *testing.T) {
+	logConfig()
 	servers := 5
 	cfg := make_config(t, servers, true)
 	defer cfg.cleanup()
@@ -780,6 +792,7 @@ func TestUnreliableAgree2C(t *testing.T) {
 }
 
 func TestFigure8Unreliable2C(t *testing.T) {
+	logConfig()
 	servers := 5
 	cfg := make_config(t, servers, true)
 	defer cfg.cleanup()
@@ -980,10 +993,12 @@ func internalChurn(t *testing.T, unreliable bool) {
 }
 
 func TestReliableChurn2C(t *testing.T) {
+	logConfig()
 	internalChurn(t, false)
 }
 
 func TestUnreliableChurn2C(t *testing.T) {
+	logConfig()
 	internalChurn(t, true)
 }
 //

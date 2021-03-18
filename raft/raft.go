@@ -18,9 +18,12 @@ package raft
 //
 
 import (
+	"bytes"
+	"errors"
 	"fmt"
 	"github.com/sirupsen/logrus"
 	"math/rand"
+	"mit6.824/labgob"
 	"sort"
 	"sync"
 	"time"
@@ -85,8 +88,9 @@ type Raft struct {
 	commitIndex    int
 	lastApplied    int
 	snapshotMeta   Snapshot
-	candidateState *CandidateState
+	candidateState CandidateState
 	leaderState    *LeaderState
+	dirty          bool
 }
 
 type Snapshot struct {
@@ -97,7 +101,7 @@ type Snapshot struct {
 type LeaderState struct {
 	nextIndex     []int
 	matchIndex    []int
-	heartbeatCond *sync.Cond
+	newEntryCond  *sync.Cond
 	lastHeartbeat []int64
 }
 
@@ -116,7 +120,8 @@ func (rf *Raft) resetTimeout() {
 
 func (rf *Raft) ticker() {
 	// TODO howZ: 每一个tick要check的东西太多了！ optimize：时间轮算法
-	const tickInterval = time.Millisecond
+	// fixme howz: 不停抢占锁
+	const tickInterval = 5 * time.Millisecond
 	for {
 		<-time.After(tickInterval)
 		if rf.killed() {
@@ -124,10 +129,9 @@ func (rf *Raft) ticker() {
 		}
 
 		rf.mu.Lock()
-		if nowUnixNano() > rf.elecTimeout {
-			if rf.role != leader {
-				rf.initiateNewElection()
-			}
+		if nowUnixNano() > rf.elecTimeout && rf.role != leader {
+			rf.initiateNewElection()
+			rf.persist()
 		}
 		if rf.role == leader {
 			for peerID := range rf.peers {
@@ -137,8 +141,7 @@ func (rf *Raft) ticker() {
 				if !rf.leaderState.needHeartbeat(peerID) {
 					continue
 				}
-				rf.leaderState.heartbeatCond.Broadcast()
-				break
+				go rf.sendHeartbeatTo(peerID)
 			}
 		}
 		rf.mu.Unlock()
@@ -159,36 +162,52 @@ func (rf *Raft) GetState() (int, bool) {
 // see paper's Figure 2 for a description of what should be persistent.
 //
 func (rf *Raft) persist() {
-	// Your code here (2C).
-	// Example:
-	// w := new(bytes.Buffer)
-	// e := labgob.NewEncoder(w)
-	// e.Encode(rf.xxx)
-	// e.Encode(rf.yyy)
-	// data := w.Bytes()
-	// rf.persister.SaveRaftState(data)
+	w := new(bytes.Buffer)
+	e := labgob.NewEncoder(w)
+	e.Encode(rf.currentTerm)
+	e.Encode(rf.role)
+	e.Encode(rf.votedFor)
+	e.Encode(rf.log)
+	e.Encode(rf.snapshotMeta.lastIncluded)
+	e.Encode(rf.snapshotMeta.lastIncludeTerm)
+	e.Encode(rf.candidateState.voteGot)
+	data := w.Bytes()
+	rf.persister.SaveRaftState(data)
+	rf.wipeDirty()
 }
 
 //
 // restore previously persisted state.
 //
 func (rf *Raft) readPersist(data []byte) {
-	if data == nil || len(data) < 1 { // bootstrap without any state?
-		return
-	}
-	// Your code here (2C).
-	// Example:
-	// r := bytes.NewBuffer(data)
-	// d := labgob.NewDecoder(r)
-	// var xxx
-	// var yyy
-	// if d.Decode(&xxx) != nil ||
-	//    d.Decode(&yyy) != nil {
-	//   error...
-	// } else {
-	//   rf.xxx = xxx
-	//   rf.yyy = yyy
-	// }
+	r := bytes.NewBuffer(data)
+	d := labgob.NewDecoder(r)
+	err := d.Decode(&rf.currentTerm)
+	checkErr(err)
+	err = d.Decode(&rf.role)
+	checkErr(err)
+	err = d.Decode(&rf.votedFor)
+	checkErr(err)
+	err = d.Decode(&rf.log)
+	checkErr(err)
+	err = d.Decode(&rf.snapshotMeta.lastIncluded)
+	checkErr(err)
+	err = d.Decode(&rf.snapshotMeta.lastIncludeTerm)
+	checkErr(err)
+	err = d.Decode(&rf.candidateState.voteGot)
+	checkErr(err)
+}
+
+func (rf *Raft) markDirty() {
+	rf.dirty = true
+}
+
+func (rf *Raft) wipeDirty() {
+	rf.dirty = false
+}
+
+func (rf *Raft) isDirty() bool {
+	return rf.dirty
 }
 
 //
@@ -196,12 +215,16 @@ func (rf *Raft) readPersist(data []byte) {
 // field names must start with capital letters!
 //
 type RequestVoteArgs struct {
-	// Your data here (2A, 2B).
 	Term         int
 	CandidateID  int
 	LastLogIndex int
 	LastLogTerm  int
-	Debug        DebugData
+	CreateTs     int64
+}
+
+// only vote for candidate whose log is at least as up-to-date as this log
+func (args *RequestVoteArgs) AsUpToDateAs(lastLogTerm, lastLogIdx int) bool {
+	return args.LastLogTerm > lastLogTerm || (args.LastLogTerm == lastLogTerm && args.LastLogIndex >= lastLogIdx)
 }
 
 //
@@ -218,20 +241,35 @@ type RequestVoteReply struct {
 //
 func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 	rf.mu.Lock()
-	defer rf.mu.Unlock()
+	lastLogTerm, lastLogIdx := rf.lastLogTermIndex()
+	defer func() {
+		logrus.Debugf("%s exec RequestVote, lastLog=[Index%d,Term%d], args=%+v, reply=%+v",
+			rf.desc(), lastLogIdx, lastLogTerm, args, reply)
+		rf.persistIfDirty()
+		rf.mu.Unlock()
+	}()
 
-	if args.Term > rf.currentTerm {
-		// only vote for candidate whose log is at least as up-to-date as this log
-		lastLogTerm, lastLogIdx := rf.lastLogTermIndex()
-		if args.LastLogTerm > lastLogTerm || (args.LastLogTerm == lastLogTerm && args.LastLogIndex >= lastLogIdx) {
-			reply.VoteGranted = true
-			rf.votedFor = args.CandidateID
-			rf.changeToFollower(args.Term)
-		}
-	} else if args.Term == rf.currentTerm && rf.votedFor == args.CandidateID {
-		reply.VoteGranted = true
-	}
 	reply.Term = rf.currentTerm
+	if args.Term < rf.currentTerm {
+		reply.VoteGranted = false
+		return
+	}
+	if args.Term > rf.currentTerm {
+		rf.changeToFollower(args.Term)
+	}
+	if rf.votedFor == args.CandidateID {
+		reply.VoteGranted = true
+		return
+	}
+	if !rf.voted() && args.AsUpToDateAs(lastLogTerm, lastLogIdx) {
+		reply.VoteGranted = true
+		rf.votedFor = args.CandidateID
+		rf.markDirty()
+	}
+}
+
+func (rf *Raft) voted() bool {
+	return rf.votedFor >= 0
 }
 
 // outer lock
@@ -253,9 +291,24 @@ type AppendEntryArgs struct {
 	LeaderID     int
 	PrevLogIndex int
 	PrevLogTerm  int
-	Entries      []*labrpc.LogEntry
 	LeaderCommit int
-	Debug        DebugData
+	CreateTs     int64
+	Entries      []*labrpc.LogEntry
+}
+
+func (args *AppendEntryArgs) String() string {
+	return fmt.Sprintf("{Term=%v,LeaderID=%v,PrevLog[Idx%v Term%v],LeaderCommit=%v,CreateTs=%d, [%d]Entries=%s}",
+		args.Term, args.LeaderID, args.PrevLogIndex, args.PrevLogTerm, args.LeaderCommit, args.CreateTs, len(args.Entries), args.StringEntries())
+}
+
+func (args *AppendEntryArgs) StringEntries() string {
+	const display = 3
+	if len(args.Entries) <= display {
+		return entriesString(args.PrevLogIndex+1, args.Entries)
+	}
+	start := len(args.Entries)-display
+	startMonoIdx := args.PrevLogIndex+ start +1
+	return "..."+entriesString(startMonoIdx, args.Entries[start:])
 }
 
 type AppendEntryReply struct {
@@ -264,16 +317,11 @@ type AppendEntryReply struct {
 	LastIndexOfTerm int
 }
 
-type DebugData struct {
-	CreateTs int64
-	Caller   int
-	Called   int
-}
-
 func (rf *Raft) AppendEntry(args *AppendEntryArgs, reply *AppendEntryReply) {
 	rf.mu.Lock()
 	defer rf.mu.Unlock()
-	logrus.Debugf("%s receive AppendEntry, args=%+v", rf.desc(), args)
+	defer rf.persistIfDirty()
+	logrus.Debugf("%s exec AppendEntry, args=%s", rf.desc(), args)
 
 	reply.Term = rf.currentTerm
 	if args.Term < rf.currentTerm {
@@ -284,60 +332,95 @@ func (rf *Raft) AppendEntry(args *AppendEntryArgs, reply *AppendEntryReply) {
 	if rf.role == follower {
 		rf.resetTimeout()
 	}
-	if args.Term >= rf.currentTerm && rf.role != follower {
+	if (args.Term == rf.currentTerm && rf.role != follower) || args.Term > rf.currentTerm {
 		rf.changeToFollower(args.Term)
 	}
 
-	var start int // 从log中的start开始合并
+	var realIdxStart int // 从log中的start开始合并
 	if args.PrevLogIndex > 0 {
-		start = rf.findEntryWithTerm(args.PrevLogIndex, args.PrevLogTerm) + 1
+		realIdxStart = rf.findEntryWithTerm(args.PrevLogIndex, args.PrevLogTerm) + 1
 	}
-	if start < 0 {
+	if realIdxStart < 0 {
 		reply.Success = false
 		reply.LastIndexOfTerm = rf.lastIndexOfTerm(args.PrevLogTerm)
-		logrus.Debugf("%s exec AppendEntry, log=%v", rf.desc(), rf.logString())
+		//logrus.Debugf("%s exec AppendEntry, log=%v", rf.desc(), rf.entriesString())
 		return
 	}
-	commit := min(args.LeaderCommit, args.PrevLogIndex+len(args.Entries)) // 只能提交leader已经提交，且肯定与leader匹配的部分LogEntry
-	if commit > rf.commitIndex {
-		logrus.Debugf("%s committing %v, log=%s, start=%v", rf.desc(), commit, rf.logString(), start)
-		rf.commitIndex = commit
-		rf.applyCond.Signal()
+	rf.updateCommitIdx(args)
+	rf.appendEntries(realIdxStart, args.Entries)
+	if len(rf.log) > snapshotTriggerCond {
+		rf.snapshot()
 	}
 	reply.Success = true
-	if len(args.Entries) == 0 {
+}
+
+// 只能提交leader已经提交，且肯定与leader匹配的部分LogEntry
+func (rf *Raft) updateCommitIdx(args *AppendEntryArgs) {
+	commit := min(args.LeaderCommit, args.PrevLogIndex+len(args.Entries))
+	if commit > rf.commitIndex {
+		logrus.Debugf("%s update commitIndex %v, log=%s", rf.desc(), commit, rf.StringLog())
+		rf.commitIndex = commit
+		rf.applyCond.Signal()
+		rf.markDirty()
+	}
+}
+
+func (rf *Raft) StringLog() string {
+	const display = 3
+	if len(rf.log) <= display {
+		return entriesString(rf.snapshotMeta.lastIncluded+1, rf.log)
+	}
+	start := len(rf.log)-display
+	startMonoIdx := rf.snapshotMeta.lastIncluded + start + 1
+	return "..."+entriesString(startMonoIdx, rf.log[start:])
+}
+
+func (rf *Raft) appendEntry(command interface{}) {
+	rf.log = append(rf.log, &labrpc.LogEntry{
+		Term: rf.currentTerm,
+		Cmd:  command,
+	})
+	rf.markDirty()
+	//rf.printLog()
+}
+
+func (rf *Raft) appendEntries(start int, entries []*labrpc.LogEntry) {
+	if len(entries) == 0 {
 		return
 	}
-	for i, entry := range args.Entries {
+	for i, entry := range entries {
 		if start+i >= len(rf.log) {
-			rf.log = append(rf.log, args.Entries[i:]...)
+			rf.log = append(rf.log, entries[i:]...)
 			break
 		}
 		if entry.Term != rf.log[start+i].Term {
 			rf.log = rf.log[:start+i]
-			rf.log = append(rf.log, args.Entries[i:]...)
+			rf.log = append(rf.log, entries[i:]...)
 			break
 		}
 	}
-	if len(rf.log) > snapshotTriggerCond {
-		rf.snapshot()
-	}
+	rf.markDirty()
+	//rf.printLog()
 }
 
-func (rf *Raft) logString() string {
-	s := ""
-	for i, e := range rf.log {
-		s += fmt.Sprintf("%d{term=%v,cmd=%v}, ", i, e.Term, e.Cmd)
+func (rf *Raft) persistIfDirty() {
+	if rf.isDirty() {
+		rf.persist()
 	}
-	return s
 }
 
 func (rf *Raft) printLog() {
-	logrus.Debugf("%s printLog, log=%v", rf.desc(), rf.logString())
+	//logrus.Debugf("%s printLog, log=%v", rf.desc(), entriesString(rf.log))
 }
 
 func (rf *Raft) desc() string {
-	return fmt.Sprintf("[Term%v|peer%v|%v]", rf.currentTerm, rf.me, rf.role)
+	desc := fmt.Sprintf("[Term%d|Peer%d|%v", rf.currentTerm, rf.me, rf.role)
+	if rf.role != leader {
+		timeoutLeft := (rf.elecTimeout - nowUnixNano()) / int64(time.Millisecond)
+		desc += fmt.Sprintf("|ETo%d", timeoutLeft)
+	}
+	desc += "]"
+	return desc
 }
 
 // 根据 单增索引 在log中查找对应条目，返回实际位置
@@ -358,8 +441,8 @@ func (rf *Raft) findEntryWithTerm(idx, term int) int {
 	return realIndex
 }
 
-func (rf *Raft) findEntry(idx int) *labrpc.LogEntry {
-	realIndex := rf.getRealIndex(idx)
+func (rf *Raft) findEntry(monoIdx int) *labrpc.LogEntry {
+	realIndex := rf.getRealIndex(monoIdx)
 	if realIndex < 0 || realIndex >= len(rf.log) {
 		return nil
 	}
@@ -421,41 +504,66 @@ func (rf *Raft) getMonoIndex(ri int) int {
 // that the caller passes the address of the reply struct with &, not
 // the struct itself.
 //
-func (rf *Raft) sendRequestVote(server int, args *RequestVoteArgs) {
-	reply := new(RequestVoteReply)
-	ok := rf.peers[server].Call("Raft.RequestVote", args, reply)
-	if !ok {
-		logrus.Debugf("sendRequestVote to peer %d failed", server)
-		return
+func (rf *Raft) requestVoteFrom(peerID int) {
+	rf.mu.Lock()
+	defer rf.mu.Unlock()
+	defer rf.persistIfDirty()
+
+	args := &RequestVoteArgs{
+		Term:        rf.currentTerm,
+		CandidateID: rf.me,
+		CreateTs:    nowUnixNano(),
 	}
+	args.LastLogTerm, args.LastLogIndex = rf.lastLogTermIndex()
+	logrus.Debugf("%s requestVoteFrom peer%d, args=%+v", rf.desc(), peerID, args)
+	reply := new(RequestVoteReply)
+	ok := rf.RequestVoteRPC(peerID, args, reply)
 	if rf.killed() {
 		return
 	}
-
-	rf.mu.Lock()
-	defer rf.mu.Unlock()
-	if reply.Term < rf.currentTerm {
+	if !ok {
+		logrus.Debugf("%s requestVoteFrom peer%d RPC failed, CreateTs=%d", rf.desc(), peerID, args.CreateTs)
 		return
 	}
+	logrus.Debugf("%s requestVoteFrom peer%d returned, CreateTs=%d, reply=%+v", rf.desc(), peerID, args.CreateTs, reply)
 	if reply.Term > rf.currentTerm {
-		logrus.Debugf("bigger term %d received, currentTerm=%d", reply.Term, rf.currentTerm)
-		if rf.role == candidate || rf.role == leader {
-			rf.changeToFollower(reply.Term)
-		}
+		rf.changeToFollower(reply.Term)
+		return
+	}
+	if args.Term < rf.currentTerm {
 		return
 	}
 	if rf.role != candidate {
 		// 此轮选举已经结束
 		return
 	}
-
-	logrus.Debugf("%s request vote from peer%v, VoteGranted=%v", rf.desc(), server, reply.VoteGranted)
-	if reply.VoteGranted {
-		rf.candidateState.voteGot[server] = true
-		if rf.gotMajorityVote() {
-			rf.changeToLeader()
-		}
+	if !reply.VoteGranted {
+		return
 	}
+	rf.candidateState.voteGot[peerID] = true
+	if rf.gotMajorityVote() {
+		rf.changeToLeader()
+	}
+	rf.markDirty()
+}
+
+func (rf *Raft) AppendEntryRPC(peerID int, args *AppendEntryArgs, reply *AppendEntryReply) bool {
+	logrus.Debugf("%s AppendEntry to peer%d, args=%s", rf.desc(), peerID, args)
+	rf.mu.Unlock()
+	start := time.Now()
+	ok := rf.peers[peerID].Call("Raft.AppendEntry", args, reply)
+	logrus.Debugf("AppendEntryRPC CreateTs %d, cost %v", args.CreateTs, time.Now().Sub(start))
+	rf.mu.Lock()
+	return ok
+}
+
+func (rf *Raft) RequestVoteRPC(peerID int, args *RequestVoteArgs, reply *RequestVoteReply) bool {
+	rf.mu.Unlock()
+	start := time.Now()
+	ok := rf.peers[peerID].Call("Raft.RequestVote", args, reply)
+	logrus.Debugf("RequestVoteRPC CreateTs %d, cost %v", args.CreateTs, time.Now().Sub(start))
+	rf.mu.Lock()
+	return ok
 }
 
 //
@@ -475,6 +583,7 @@ func (rf *Raft) sendRequestVote(server int, args *RequestVoteArgs) {
 func (rf *Raft) Start(command interface{}) (int, int, bool) {
 	rf.mu.Lock()
 	defer rf.mu.Unlock()
+	defer rf.persistIfDirty()
 
 	index := -1
 	term := -1
@@ -482,14 +591,10 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 		return index, term, false
 	}
 	logrus.Debugf("%s Start(%v)", rf.desc(), command)
-	rf.log = append(rf.log, &labrpc.LogEntry{
-		Term: rf.currentTerm,
-		Cmd:  command,
-	})
+	rf.appendEntry(command)
 	term, index = rf.lastLogTermIndex()
 	rf.leaderState.matchIndex[rf.me] = index
-	rf.leaderState.heartbeatCond.Broadcast()
-
+	rf.leaderState.newEntryCond.Broadcast()
 	if len(rf.log) > snapshotTriggerCond {
 		rf.snapshot()
 	}
@@ -518,11 +623,7 @@ func (rf *Raft) killed() bool {
 }
 
 func (rf *Raft) randElectionTimeout() int64 {
-	const (
-		ElectionTimeoutLowerLimit = int64(150 * time.Millisecond)
-		ElectionTimeoutRange      = int64(150 * time.Millisecond)
-	)
-	return ElectionTimeoutLowerLimit + rf.rand.Int63n(ElectionTimeoutRange)
+	return ElectionTimeout + rf.rand.Int63n(ElectionTimeout)
 }
 
 // outer lock
@@ -530,22 +631,23 @@ func (rf *Raft) changeToFollower(term int) {
 	from := rf.desc()
 	rf.role = follower
 	rf.currentTerm = term
+	rf.votedFor = -1
 	rf.resetTimeout()
+	rf.markDirty()
 	logrus.Infof("%s -> %s", from, rf.desc())
 }
 
 func (rf *Raft) initiateNewElection() {
+	rf.markDirty()
 	from := rf.desc()
 	rf.role = candidate
 	rf.currentTerm++
 	logrus.Infof("%s -> %s", from, rf.desc())
 	rf.resetTimeout()
-	if rf.candidateState == nil {
-		rf.candidateState = &CandidateState{}
-	}
 	rf.candidateState.voteGot = make([]bool, len(rf.peers))
 
 	// vote for self
+	rf.votedFor = rf.me
 	rf.candidateState.voteGot[rf.me] = true
 	if rf.gotMajorityVote() {
 		rf.changeToLeader()
@@ -556,30 +658,18 @@ func (rf *Raft) initiateNewElection() {
 		if i == rf.me {
 			continue
 		}
-		args := &RequestVoteArgs{
-			Term:        rf.currentTerm,
-			CandidateID: rf.me,
-			Debug: DebugData{
-				CreateTs: nowUnixNano(),
-				Caller:   rf.me,
-				Called:   i,
-			},
-		}
-		args.LastLogTerm, args.LastLogIndex = rf.lastLogTermIndex()
-		go rf.sendRequestVote(i, args)
+		go rf.requestVoteFrom(i)
 	}
 }
 
 func (rf *Raft) changeToLeader() {
 	logrus.Infof("%s -> leader", rf.desc())
 	rf.role = leader
-	if rf.leaderState == nil {
-		rf.leaderState = &LeaderState{
-			nextIndex:     make([]int, len(rf.peers)),
-			matchIndex:    make([]int, len(rf.peers)),
-			lastHeartbeat: make([]int64, len(rf.peers)),
-			heartbeatCond: sync.NewCond(&rf.mu),
-		}
+	rf.leaderState = &LeaderState{
+		nextIndex:     make([]int, len(rf.peers)),
+		matchIndex:    make([]int, len(rf.peers)),
+		lastHeartbeat: make([]int64, len(rf.peers)),
+		newEntryCond:  sync.NewCond(&rf.mu),
 	}
 	for i := range rf.leaderState.nextIndex {
 		rf.leaderState.nextIndex[i] = rf.getMonoIndex(len(rf.log))
@@ -591,74 +681,54 @@ func (rf *Raft) changeToLeader() {
 		}
 		go rf.syncLogEntriesTo(peerID)
 	}
+	rf.markDirty()
 }
 
 func (rf *Raft) syncLogEntriesTo(peerID int) {
 	rf.mu.Lock()
+	defer rf.mu.Unlock()
 	logrus.Debugf("%s syncLogEntriesTo %d start....", rf.desc(), peerID)
 
 	// the first heartbeat announces the newly elected leader
 	args := &AppendEntryArgs{
 		Term:     rf.currentTerm,
 		LeaderID: rf.me,
-		Debug: DebugData{
-			Caller: rf.me,
-			Called: peerID,
-		},
 	}
 	args.PrevLogTerm, args.PrevLogIndex = rf.lastLogTermIndex()
 
 	for {
 		rf.leaderState.lastHeartbeat[peerID] = nowUnixNano()
 		args.LeaderCommit = rf.commitIndex
-		rf.mu.Unlock()
-		args.Debug.CreateTs = nowUnixNano()
+		args.CreateTs = nowUnixNano()
 		reply := &AppendEntryReply{}
-		ok := rf.peers[peerID].Call("Raft.AppendEntry", args, reply)
-		if rf.killed() {
-			return
-		}
-		rf.mu.Lock()
-
-		// retry
-		if !ok {
-			logrus.Debugf("%s AppendEntry to peer %d failed", rf.desc(), peerID)
-			continue
-		}
-		// not leader, stop syncing
-		if rf.role != leader {
-			logrus.Debugf("%s syncLogEntriesTo end: not leader after AppendEntry", rf.desc())
-			break
-		}
-		// stale goroutine
-		if args.Term < rf.currentTerm {
-			logrus.Debugf("%s syncLogEntriesTo end: stale goroutine. reply.Term=%v", rf.desc(), reply.Term)
-			break
-		}
+		ok := rf.AppendEntryRPC(peerID, args, reply)
 		// peer in bigger term found
 		if reply.Term > rf.currentTerm {
-			logrus.Debugf("%s syncLogEntriesTo end: reply.Term=%v", rf.desc(), reply.Term)
+			logrus.Debugf("%s syncLogEntriesTo [Term%d|Peer%d] end", rf.desc(), reply.Term, peerID)
 			rf.changeToFollower(reply.Term)
+			rf.persist()
 			break
 		}
+		if err := rf.checkStopSyncLog(args.Term); err != nil {
+			logrus.Debugf("%s syncLogEntriesTo peer%d end, after AppendEntryRPC: %v", rf.desc(), peerID, err)
+			break
+		}
+		if !ok { // retry
+			logrus.Debugf("%s AppendEntry to peer%d RPC failed, CreateTs=%d", rf.desc(), peerID, args.CreateTs)
+			continue
+		}
 
+		logrus.Debugf("%s AppendEntry to peer%d returned, CreateTs=%d, reply=%+v", rf.desc(), peerID, args.CreateTs, reply)
 		var realIndexMatch int // 下一个可能match的位置
 		if reply.Success {
 			rf.leaderState.nextIndex[peerID] = args.PrevLogIndex + len(args.Entries) + 1
 			rf.leaderState.matchIndex[peerID] = args.PrevLogIndex + len(args.Entries)
 			rf.checkCommit()
+			rf.persist()
 
-			rf.waitHeartbeatLocked(peerID)
-			if rf.killed() {
-				break
-			}
-			if rf.role != leader {
-				logrus.Debugf("%s syncLogEntriesTo end: not leader after waitHeartbeatLocked", rf.desc())
-				break
-			}
-			// stale goroutine
-			if args.Term < rf.currentTerm {
-				logrus.Debugf("%s syncLogEntriesTo end: stale goroutine. reply.Term=%v", rf.desc(), reply.Term)
+			rf.waitNewLogEntry(peerID)
+			if err := rf.checkStopSyncLog(args.Term); err != nil {
+				logrus.Debugf("%s syncLogEntriesTo peer%d end, after waitNewLogEntry: %v", rf.desc(), peerID, err)
 				break
 			}
 
@@ -668,8 +738,7 @@ func (rf *Raft) syncLogEntriesTo(peerID int) {
 		}
 		if realIndexMatch <= realIndexInvalid {
 			rf.sendSnapshotTo(peerID)
-		}
-		if realIndexMatch == realIndexLastApplied {
+		} else if realIndexMatch == realIndexLastApplied {
 			args.PrevLogIndex = rf.snapshotMeta.lastIncluded
 			args.PrevLogTerm = rf.snapshotMeta.lastIncludeTerm
 		} else {
@@ -678,7 +747,57 @@ func (rf *Raft) syncLogEntriesTo(peerID int) {
 		}
 		args.Entries = rf.log[realIndexMatch+1:]
 	}
-	rf.mu.Unlock()
+}
+
+func (rf *Raft) sendHeartbeatTo(peerID int) {
+	rf.mu.Lock()
+	defer rf.mu.Unlock()
+	defer rf.persistIfDirty()
+
+	now := nowUnixNano()
+	rf.leaderState.lastHeartbeat[peerID] = now
+	args := &AppendEntryArgs{
+		Term:     rf.currentTerm,
+		LeaderID: rf.me,
+		LeaderCommit: rf.commitIndex,
+		CreateTs: now,
+	}
+	realIndexMatch := rf.getRealIndex(rf.leaderState.matchIndex[peerID])
+	if realIndexMatch <= realIndexInvalid {
+		rf.sendSnapshotTo(peerID)
+		args.PrevLogTerm, args.PrevLogIndex = rf.lastLogTermIndex()
+	} else if realIndexMatch == realIndexLastApplied {
+		args.PrevLogIndex = rf.snapshotMeta.lastIncluded
+		args.PrevLogTerm = rf.snapshotMeta.lastIncludeTerm
+	} else {
+		args.PrevLogIndex = rf.getMonoIndex(realIndexMatch)
+		args.PrevLogTerm = rf.log[realIndexMatch].Term
+	}
+	reply := &AppendEntryReply{}
+	ok := rf.AppendEntryRPC(peerID, args, reply)
+	if !ok { // retry
+		logrus.Debugf("%s sendHeartbeatTo to peer%d RPC failed, CreateTs=%d", rf.desc(), peerID, args.CreateTs)
+		return
+	}
+	if reply.Term > rf.currentTerm {
+		logrus.Debugf("%s sendHeartbeatTo [Term%d|Peer%d], newer term found", rf.desc(), reply.Term, peerID)
+		rf.changeToFollower(reply.Term)
+		return
+	}
+	logrus.Debugf("%s sendHeartbeatTo to peer%d returned, CreateTs=%d, reply=%+v", rf.desc(), peerID, args.CreateTs, reply)
+}
+
+func (rf *Raft) checkStopSyncLog(syncTerm int) error {
+	if rf.killed() {
+		return errors.New("killed")
+	}
+	if rf.role != leader {
+		return errors.New("not leader")
+	}
+	if syncTerm < rf.currentTerm {
+		return errors.New("stale sync goroutine")
+	}
+	return nil
 }
 
 func (rf *Raft) findMatchQuickly(args *AppendEntryArgs, reply *AppendEntryReply) int {
@@ -704,21 +823,17 @@ func (rf *Raft) findMatchQuickly(args *AppendEntryArgs, reply *AppendEntryReply)
 func (rf *Raft) sendSnapshotTo(peerID int) {
 	// TODO howz
 	logrus.Debugf("need snapshot to peer %d", peerID)
-	rf.printLog()
+	//rf.printLog()
 	panic("snapshot")
 }
 
-func (rf *Raft) waitHeartbeatLocked(peerID int) {
-	for {
-		if !rf.syncWith(peerID) {
-			logrus.Debugf("%s found new command, AppendEntry to %d", rf.desc(), peerID)
-			break
-		}
-		if nowUnixNano()-rf.leaderState.lastHeartbeat[peerID] > int64(heartbeatIntv) {
-			logrus.Debugf("%s prepare to send heartbeat to %d", rf.desc(), peerID)
-			break
-		}
-		rf.leaderState.heartbeatCond.Wait()
+func (rf *Raft) waitNewLogEntry(peerID int) {
+	for rf.syncWith(peerID) {
+		//if nowUnixNano()-rf.leaderState.lastHeartbeat[peerID] > int64(heartbeatIntv) {
+		//	logrus.Debugf("%s prepare to send heartbeat to %d", rf.desc(), peerID)
+		//	break
+		//}
+		rf.leaderState.newEntryCond.Wait()
 	}
 }
 
@@ -737,11 +852,11 @@ func (rf *Raft) checkCommit() {
 	} else {
 		middle = len(sortedMatch) / 2
 	}
-	median := sortedMatch[middle]
-	if median > rf.commitIndex {
-		rf.commitIndex = median
+	medianMatch := sortedMatch[middle]
+	if medianMatch > rf.commitIndex && rf.findEntry(medianMatch).Term == rf.currentTerm {
+		rf.commitIndex = medianMatch
 		rf.applyCond.Signal()
-		logrus.Infof("checkCommit: %s commit %d", rf.desc(), rf.commitIndex)
+		logrus.Infof("%s checkCommit, update commitIndex %d, log=%s", rf.desc(), rf.commitIndex, rf.StringLog())
 	}
 }
 
@@ -822,8 +937,11 @@ func Make(peers []*labrpc.ClientEnd, me int,
 
 	if rawData := persister.ReadRaftState(); len(rawData) > 0 {
 		rf.readPersist(rawData)
-	} else {
-		rf.changeToFollower(0)
+	}
+	if rf.role == follower {
+		rf.resetTimeout()
+	} else if rf.role == leader {
+		rf.changeToLeader()
 	}
 
 	go rf.applyDamon(applyCh)
@@ -833,8 +951,6 @@ func Make(peers []*labrpc.ClientEnd, me int,
 
 func (rf *Raft) applyDamon(applyCh chan ApplyMsg) {
 	rf.mu.Lock()
-	defer rf.mu.Unlock()
-
 	for {
 		for rf.lastApplied == rf.commitIndex {
 			rf.applyCond.Wait()
@@ -850,16 +966,18 @@ func (rf *Raft) applyDamon(applyCh chan ApplyMsg) {
 				Command:      rf.log[rf.getRealIndex(rf.lastApplied)].Cmd,
 				CommandIndex: rf.lastApplied,
 			}
-			logrus.Debugf("%s applying msg=%+v", rf.desc(), msg)
+			//logrus.Debugf("%s applying msg=%+v", rf.desc(), msg)
 			rf.mu.Unlock()
 			applyCh <- msg
+			rf.mu.Lock()
 			if rf.killed() {
 				break
 			}
-			rf.mu.Lock()
-			logrus.Debugf("%s applied msg=%+v", rf.desc(), msg)
+			rf.persist()
+			//logrus.Debugf("%s applied msg=%+v", rf.desc(), msg)
 		}
 	}
+	rf.mu.Unlock()
 }
 
 func (rf *Raft) snapshot() {
