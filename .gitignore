@@ -10,4 +10,4 @@ mrworker
 wc.so
 mrapps/*.so
 raft/raft.log
-raft/tmp.txt
+raft/tmp*

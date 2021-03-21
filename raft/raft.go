@@ -85,6 +85,7 @@ type Raft struct {
 	votedFor       int
 	elecTimeout    int64
 	log            []*labrpc.LogEntry
+	matchIndex	   int
 	commitIndex    int
 	lastApplied    int
 	snapshotMeta   Snapshot
@@ -321,7 +322,7 @@ func (rf *Raft) AppendEntry(args *AppendEntryArgs, reply *AppendEntryReply) {
 	rf.mu.Lock()
 	defer rf.mu.Unlock()
 	defer rf.persistIfDirty()
-	logrus.Debugf("%s exec AppendEntry, args=%s", rf.desc(), args)
+	logrus.Debugf("%s receive AppendEntry, args=%s", rf.desc(), args)
 
 	reply.Term = rf.currentTerm
 	if args.Term < rf.currentTerm {
@@ -335,6 +336,7 @@ func (rf *Raft) AppendEntry(args *AppendEntryArgs, reply *AppendEntryReply) {
 	if (args.Term == rf.currentTerm && rf.role != follower) || args.Term > rf.currentTerm {
 		rf.changeToFollower(args.Term)
 	}
+	defer rf.updateCommitIdx(args.LeaderCommit) // 收到leader（term不小于自己）的消息，就可能更新 commitIndex
 
 	var realIdxStart int // 从log中的start开始合并
 	if args.PrevLogIndex > 0 {
@@ -346,7 +348,7 @@ func (rf *Raft) AppendEntry(args *AppendEntryArgs, reply *AppendEntryReply) {
 		//logrus.Debugf("%s exec AppendEntry, log=%v", rf.desc(), rf.entriesString())
 		return
 	}
-	rf.updateCommitIdx(args)
+	rf.updateMatchIndex(args) // 只要PrevLog匹配成功，就可能更新matchIndex
 	rf.appendEntries(realIdxStart, args.Entries)
 	if len(rf.log) > snapshotTriggerCond {
 		rf.snapshot()
@@ -355,13 +357,20 @@ func (rf *Raft) AppendEntry(args *AppendEntryArgs, reply *AppendEntryReply) {
 }
 
 // 只能提交leader已经提交，且肯定与leader匹配的部分LogEntry
-func (rf *Raft) updateCommitIdx(args *AppendEntryArgs) {
-	commit := min(args.LeaderCommit, args.PrevLogIndex+len(args.Entries))
+func (rf *Raft) updateCommitIdx(leaderCommit int) {
+	commit := min(leaderCommit, rf.matchIndex)
 	if commit > rf.commitIndex {
 		logrus.Debugf("%s update commitIndex %v, log=%s", rf.desc(), commit, rf.StringLog())
 		rf.commitIndex = commit
 		rf.applyCond.Signal()
 		rf.markDirty()
+	}
+}
+
+func (rf *Raft) updateMatchIndex(args *AppendEntryArgs) {
+	match := args.PrevLogIndex+len(args.Entries)
+	if match > rf.matchIndex {
+		rf.matchIndex = match
 	}
 }
 
@@ -548,7 +557,6 @@ func (rf *Raft) requestVoteFrom(peerID int) {
 }
 
 func (rf *Raft) AppendEntryRPC(peerID int, args *AppendEntryArgs, reply *AppendEntryReply) bool {
-	logrus.Debugf("%s AppendEntry to peer%d, args=%s", rf.desc(), peerID, args)
 	rf.mu.Unlock()
 	start := time.Now()
 	ok := rf.peers[peerID].Call("Raft.AppendEntry", args, reply)
@@ -632,6 +640,7 @@ func (rf *Raft) changeToFollower(term int) {
 	rf.role = follower
 	rf.currentTerm = term
 	rf.votedFor = -1
+	rf.matchIndex = 0
 	rf.resetTimeout()
 	rf.markDirty()
 	logrus.Infof("%s -> %s", from, rf.desc())
@@ -701,6 +710,7 @@ func (rf *Raft) syncLogEntriesTo(peerID int) {
 		args.LeaderCommit = rf.commitIndex
 		args.CreateTs = nowUnixNano()
 		reply := &AppendEntryReply{}
+		logrus.Debugf("%s AppendEntry to peer%d, args=%s", rf.desc(), peerID, args)
 		ok := rf.AppendEntryRPC(peerID, args, reply)
 		// peer in bigger term found
 		if reply.Term > rf.currentTerm {
@@ -774,6 +784,7 @@ func (rf *Raft) sendHeartbeatTo(peerID int) {
 		args.PrevLogTerm = rf.log[realIndexMatch].Term
 	}
 	reply := &AppendEntryReply{}
+	logrus.Debugf("%s sendHeartbeatTo to peer%d, args=%s", rf.desc(), peerID, args)
 	ok := rf.AppendEntryRPC(peerID, args, reply)
 	if !ok { // retry
 		logrus.Debugf("%s sendHeartbeatTo to peer%d RPC failed, CreateTs=%d", rf.desc(), peerID, args.CreateTs)

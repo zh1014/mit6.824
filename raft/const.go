@@ -3,9 +3,9 @@ package raft
 import "time"
 
 const (
-	ElectionTimeout = int64(500 * time.Millisecond)
+	ElectionTimeout = int64(time.Second)
 
-	heartbeatIntv = 50 * time.Millisecond
+	heartbeatIntv = 100 * time.Millisecond
 
 	snapshotTriggerCond = 1000
 
