@@ -35,13 +35,13 @@ func (s taskStatus) String() string {
 }
 
 type task struct {
-	id       int
-	input 	 []string
-	status   taskStatus
+	id     int
+	input  []string
+	status taskStatus
 }
 
 type TaskMgr struct {
-	mu 	 sync.Mutex
+	mu   sync.Mutex
 	kind taskKind
 	list []*task
 

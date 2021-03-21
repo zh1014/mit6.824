@@ -16,14 +16,14 @@ type EmptyParam struct {
 
 type TaskReply struct {
 	Kind taskKind
-	ID 	 int
+	ID   int
 
 	Input []string
 }
 
 type TaskDoneArgs struct {
 	Kind taskKind
-	ID 	 int
+	ID   int
 
 	Output []string
 }
@@ -79,9 +79,9 @@ func (m *Master) TaskDone(args *TaskDoneArgs, _ *EmptyParam) error {
 		}
 		m.rdcTask.HandleMapOutput(args.Output)
 		m.mapTask.FinishTask(args.ID)
-	}else if args.Kind == taskKindReduce {
+	} else if args.Kind == taskKindReduce {
 		m.rdcTask.FinishTask(args.ID)
-	}else {
+	} else {
 		return ErrInvalidParam
 	}
 	return nil
@@ -92,4 +92,3 @@ func (m *Master) MasterDesc(_ *EmptyParam, reply *MasterDescReply) error {
 	reply.NumRdcTask = m.rdcTask.NumTask()
 	return nil
 }
-

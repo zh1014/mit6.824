@@ -10,8 +10,8 @@ import "net/rpc"
 import "net/http"
 
 type Master struct {
-	mapTask 	*TaskMgr
-	rdcTask		*RTaskMgr
+	mapTask *TaskMgr
+	rdcTask *RTaskMgr
 }
 
 //
@@ -57,9 +57,9 @@ func (m *Master) initMapTasks(files []string) {
 	taskMgr := m.mapTask
 	for i, f := range files {
 		taskMgr.list = append(taskMgr.list, &task{
-			id:       i,
-			input: 	  []string{f},
-			status:   Init,
+			id:     i,
+			input:  []string{f},
+			status: Init,
 		})
 	}
 	logrus.Info("initMapTasks done.")
@@ -72,7 +72,7 @@ func (m *Master) initReduceTasks(nReduce int) {
 	tasks := m.rdcTask.list
 	for i := range tasks {
 		tasks[i] = &task{
-			id: i,
+			id:     i,
 			status: Init,
 		}
 	}

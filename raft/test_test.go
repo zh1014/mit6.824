@@ -24,7 +24,7 @@ const RaftElectionTimeout = 1000 * time.Millisecond
 
 func TestLoop(t *testing.T) {
 	const loop = 10
-	for i := 0; i< loop; i++ {
+	for i := 0; i < loop; i++ {
 		TestFigure8Unreliable2C(t)
 	}
 }
@@ -1001,6 +1001,7 @@ func TestUnreliableChurn2C(t *testing.T) {
 	logConfig()
 	internalChurn(t, true)
 }
+
 //
 //var global int
 //

@@ -12,8 +12,8 @@ var (
 type taskKind int
 
 const (
-	taskKindMap 	taskKind = 1
-	taskKindReduce  taskKind = 2
+	taskKindMap    taskKind = 1
+	taskKindReduce taskKind = 2
 )
 
 func (k taskKind) String() string {

@@ -82,7 +82,7 @@ type ClientEnd struct {
 
 type LogEntry struct {
 	Term int
-	Cmd interface{}
+	Cmd  interface{}
 }
 
 // send an RPC, wait for the reply.

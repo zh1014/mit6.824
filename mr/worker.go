@@ -48,7 +48,7 @@ func HandleMapTask(mapf func(string, string) []KeyValue, task *TaskReply, nReduc
 	output := storeKVs(kvs, task.ID, nReduce)
 
 	// done. sync to master
-	doneArgs := TaskDoneArgs{Kind:taskKindMap, ID: task.ID, Output: output}
+	doneArgs := TaskDoneArgs{Kind: taskKindMap, ID: task.ID, Output: output}
 	call("Master.TaskDone", &doneArgs, &EmptyParam{})
 }
 
@@ -86,7 +86,7 @@ func storeKVs(kvs []KeyValue, mTaskID, nReduce int) []string {
 	}
 
 	var (
-		err error
+		err          error
 		tmpFilenames []string
 	)
 	for i, f := range tmpFiles {
@@ -179,7 +179,7 @@ func WorkerRun(mapf func(string, string) []KeyValue, reducef func(string, []stri
 			if err.Error() == ErrMasterExiting.Error() {
 				// worker exit
 				return
-			}else {
+			} else {
 				// retry
 				continue
 			}
@@ -193,9 +193,9 @@ func WorkerRun(mapf func(string, string) []KeyValue, reducef func(string, []stri
 
 		if reply.Kind == taskKindMap {
 			HandleMapTask(mapf, reply, masterDesc.NumRdcTask)
-		}else if reply.Kind == taskKindReduce {
+		} else if reply.Kind == taskKindReduce {
 			HandleReduceTask(reducef, reply)
-		}else {
+		} else {
 			logrus.Errorf("WorkerRun: unknown reply.Kind %v", reply.Kind)
 		}
 	}

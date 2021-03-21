@@ -85,7 +85,7 @@ type Raft struct {
 	votedFor       int
 	elecTimeout    int64
 	log            []*labrpc.LogEntry
-	matchIndex	   int
+	matchIndex     int
 	commitIndex    int
 	lastApplied    int
 	snapshotMeta   Snapshot
@@ -307,9 +307,9 @@ func (args *AppendEntryArgs) StringEntries() string {
 	if len(args.Entries) <= display {
 		return entriesString(args.PrevLogIndex+1, args.Entries)
 	}
-	start := len(args.Entries)-display
-	startMonoIdx := args.PrevLogIndex+ start +1
-	return "..."+entriesString(startMonoIdx, args.Entries[start:])
+	start := len(args.Entries) - display
+	startMonoIdx := args.PrevLogIndex + start + 1
+	return "..." + entriesString(startMonoIdx, args.Entries[start:])
 }
 
 type AppendEntryReply struct {
@@ -368,7 +368,7 @@ func (rf *Raft) updateCommitIdx(leaderCommit int) {
 }
 
 func (rf *Raft) updateMatchIndex(args *AppendEntryArgs) {
-	match := args.PrevLogIndex+len(args.Entries)
+	match := args.PrevLogIndex + len(args.Entries)
 	if match > rf.matchIndex {
 		rf.matchIndex = match
 	}
@@ -379,9 +379,9 @@ func (rf *Raft) StringLog() string {
 	if len(rf.log) <= display {
 		return entriesString(rf.snapshotMeta.lastIncluded+1, rf.log)
 	}
-	start := len(rf.log)-display
+	start := len(rf.log) - display
 	startMonoIdx := rf.snapshotMeta.lastIncluded + start + 1
-	return "..."+entriesString(startMonoIdx, rf.log[start:])
+	return "..." + entriesString(startMonoIdx, rf.log[start:])
 }
 
 func (rf *Raft) appendEntry(command interface{}) {
@@ -767,10 +767,10 @@ func (rf *Raft) sendHeartbeatTo(peerID int) {
 	now := nowUnixNano()
 	rf.leaderState.lastHeartbeat[peerID] = now
 	args := &AppendEntryArgs{
-		Term:     rf.currentTerm,
-		LeaderID: rf.me,
+		Term:         rf.currentTerm,
+		LeaderID:     rf.me,
 		LeaderCommit: rf.commitIndex,
-		CreateTs: now,
+		CreateTs:     now,
 	}
 	realIndexMatch := rf.getRealIndex(rf.leaderState.matchIndex[peerID])
 	if realIndexMatch <= realIndexInvalid {
