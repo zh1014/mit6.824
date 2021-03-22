@@ -128,7 +128,7 @@ func (rf *Raft) requestVoteFrom(peerID int) {
 	if !reply.VoteGranted {
 		return
 	}
-	rf.candidateState.voteGot[peerID] = true
+	rf.voteGot[peerID] = true
 	if rf.gotMajorityVote() {
 		rf.changeToLeader()
 	}
@@ -146,10 +146,10 @@ func (rf *Raft) RequestVoteRPC(peerID int, args *RequestVoteArgs, reply *Request
 
 func (rf *Raft) gotMajorityVote() bool {
 	count := 0
-	for _, got := range rf.candidateState.voteGot {
+	for _, got := range rf.voteGot {
 		if got {
 			count++
 		}
 	}
-	return count > len(rf.candidateState.voteGot)/2
+	return count > len(rf.voteGot)/2
 }

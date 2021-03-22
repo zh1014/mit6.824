@@ -21,12 +21,12 @@ import (
 	"fmt"
 	"github.com/sirupsen/logrus"
 	"math/rand"
+	"mit6.824/labrpc"
 	"sort"
 	"sync"
+	"sync/atomic"
 	"time"
 )
-import "sync/atomic"
-import "mit6.824/labrpc"
 
 // import "bytes"
 // import "../labgob"
@@ -78,20 +78,20 @@ type Raft struct {
 	statusCond *sync.Cond
 	applyCond  *sync.Cond
 
-	mu             sync.Mutex // protect follow fields
-	currentTerm    int
-	role           raftRole
-	votedFor       int
-	elecTimeout    int64
-	log            []*labrpc.LogEntry
-	matchIndex     int
-	commitIndex    int
-	lastApplied    int
-	lastHeartbeat  int64
-	snapshotMeta   Snapshot
-	candidateState CandidateState
-	leaderState    *LeaderState
-	dirty          bool
+	mu            sync.Mutex // protect follow fields
+	currentTerm   int
+	role          raftRole
+	votedFor      int
+	elecTimeout   int64
+	log           []*labrpc.LogEntry
+	matchIndex    int
+	commitIndex   int
+	lastApplied   int
+	lastHeartbeat int64
+	snapshotMeta  Snapshot
+	voteGot       []bool // for preCandidate, candidate
+	leaderState   *LeaderState
+	dirty         bool
 }
 
 type LeaderState struct {
@@ -350,11 +350,11 @@ func (rf *Raft) initiateNewElection() {
 	rf.currentTerm++
 	rf.resetTimeout()
 	logrus.Infof("%s -> %s", from, rf.desc())
-	rf.candidateState.voteGot = make([]bool, len(rf.peers))
+	rf.voteGot = make([]bool, len(rf.peers))
 
 	// vote for self
 	rf.votedFor = rf.me
-	rf.candidateState.voteGot[rf.me] = true
+	rf.voteGot[rf.me] = true
 	if rf.gotMajorityVote() {
 		rf.changeToLeader()
 		return

@@ -19,7 +19,7 @@ func (rf *Raft) persist() {
 	e.Encode(rf.log)
 	e.Encode(rf.snapshotMeta.lastIncluded)
 	e.Encode(rf.snapshotMeta.lastIncludeTerm)
-	e.Encode(rf.candidateState.voteGot)
+	e.Encode(rf.voteGot)
 	data := w.Bytes()
 	rf.persister.SaveRaftState(data)
 	rf.wipeDirty()
@@ -43,7 +43,7 @@ func (rf *Raft) readPersist(data []byte) {
 	checkErr(err)
 	err = d.Decode(&rf.snapshotMeta.lastIncludeTerm)
 	checkErr(err)
-	err = d.Decode(&rf.candidateState.voteGot)
+	err = d.Decode(&rf.voteGot)
 	checkErr(err)
 }
 

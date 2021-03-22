@@ -11,11 +11,11 @@ func (rf *Raft) becomePreCandidate() {
 	rf.role = preCandidate
 	rf.resetTimeout()
 	logrus.Infof("%s -> %s", from, rf.desc())
-	rf.candidateState.voteGot = make([]bool, len(rf.peers))
+	rf.voteGot = make([]bool, len(rf.peers))
 
 	// vote for self
 	rf.votedFor = rf.me
-	rf.candidateState.voteGot[rf.me] = true
+	rf.voteGot[rf.me] = true
 	if rf.gotMajorityVote() {
 		rf.initiateNewElection()
 		return
@@ -65,7 +65,7 @@ func (rf *Raft) requestPreVoteFrom(peerID int) {
 	if !reply.VoteGranted {
 		return
 	}
-	rf.candidateState.voteGot[peerID] = true
+	rf.voteGot[peerID] = true
 	rf.markDirty()
 	if rf.gotMajorityVote() {
 		rf.initiateNewElection()
