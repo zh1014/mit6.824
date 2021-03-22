@@ -75,3 +75,13 @@ func entriesString(i int, entries []*labrpc.LogEntry) string {
 	s += "]"
 	return s
 }
+
+func gotMajority(voteGot []bool) bool {
+	count := 0
+	for _, got := range voteGot {
+		if got {
+			count++
+		}
+	}
+	return count > len(voteGot)/2
+}
