@@ -102,7 +102,7 @@ func (rf *Raft) PreVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 	if !args.AsUpToDateAs(lastLogTerm, lastLogIdx) {
 		return
 	}
-	if nowUnixNano() - rf.lastHeartbeat < ElectionTimeout{
+	if nowUnixNano()-rf.lastHeartbeat < ElectionTimeout {
 		return
 	}
 	reply.VoteGranted = true

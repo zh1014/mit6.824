@@ -57,7 +57,7 @@ const (
 	leader
 )
 
-var roleString = map[raftRole]string {
+var roleString = map[raftRole]string{
 	follower:     "follower",
 	preCandidate: "preCandidate",
 	candidate:    "candidate",
