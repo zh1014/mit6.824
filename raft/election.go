@@ -50,7 +50,7 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 		return
 	}
 	if args.Term > rf.currentTerm {
-		rf.changeToFollower(args.Term)
+		rf.becomeFollower(args.Term)
 	}
 	if rf.votedFor == args.CandidateID {
 		reply.VoteGranted = true
@@ -115,7 +115,7 @@ func (rf *Raft) requestVoteFrom(peerID int) {
 	}
 	logrus.Debugf("%s requestVoteFrom peer%d returned, CreateTs=%d, reply=%+v", rf.desc(), peerID, args.CreateTs, reply)
 	if reply.Term > rf.currentTerm {
-		rf.changeToFollower(reply.Term)
+		rf.becomeFollower(reply.Term)
 		return
 	}
 	if args.Term < rf.currentTerm {
@@ -130,7 +130,7 @@ func (rf *Raft) requestVoteFrom(peerID int) {
 	}
 	rf.voteGot[peerID] = true
 	if rf.gotMajorityVote() {
-		rf.changeToLeader()
+		rf.becomeLeader()
 	}
 	rf.markDirty()
 }

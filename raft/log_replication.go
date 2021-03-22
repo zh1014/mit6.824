@@ -55,7 +55,7 @@ func (rf *Raft) AppendEntry(args *AppendEntryArgs, reply *AppendEntryReply) {
 	rf.lastHeartbeat = nowUnixNano()
 	rf.resetTimeout()
 	if (args.Term == rf.currentTerm && rf.role != follower) || args.Term > rf.currentTerm {
-		rf.changeToFollower(args.Term)
+		rf.becomeFollower(args.Term)
 	}
 
 	var realIdxStart int // 从log中的start开始合并
@@ -126,7 +126,7 @@ func (rf *Raft) syncLogEntriesTo(peerID int) {
 		// peer in bigger term found
 		if reply.Term > rf.currentTerm {
 			logrus.Debugf("%s syncLogEntriesTo [Term%d|Peer%d] end", rf.desc(), reply.Term, peerID)
-			rf.changeToFollower(reply.Term)
+			rf.becomeFollower(reply.Term)
 			rf.persist()
 			break
 		}
@@ -216,7 +216,7 @@ func (rf *Raft) sendHeartbeatTo(peerID int) {
 	}
 	if reply.Term > rf.currentTerm {
 		logrus.Debugf("%s sendHeartbeatTo [Term%d|Peer%d], newer term found", rf.desc(), reply.Term, peerID)
-		rf.changeToFollower(reply.Term)
+		rf.becomeFollower(reply.Term)
 		return
 	}
 	logrus.Debugf("%s sendHeartbeatTo to peer%d returned, CreateTs=%d, reply=%+v", rf.desc(), peerID, args.CreateTs, reply)

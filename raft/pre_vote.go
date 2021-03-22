@@ -17,7 +17,7 @@ func (rf *Raft) becomePreCandidate() {
 	rf.votedFor = rf.me
 	rf.voteGot[rf.me] = true
 	if rf.gotMajorityVote() {
-		rf.initiateNewElection()
+		rf.becomeCandidate()
 		return
 	}
 
@@ -52,7 +52,7 @@ func (rf *Raft) requestPreVoteFrom(peerID int) {
 	}
 	logrus.Debugf("%s requestPreVoteFrom peer%d returned, CreateTs=%d, reply=%+v", rf.desc(), peerID, args.CreateTs, reply)
 	if reply.Term > rf.currentTerm {
-		rf.changeToFollower(reply.Term)
+		rf.becomeFollower(reply.Term)
 		return
 	}
 	if args.Term < rf.currentTerm {
@@ -68,7 +68,7 @@ func (rf *Raft) requestPreVoteFrom(peerID int) {
 	rf.voteGot[peerID] = true
 	rf.markDirty()
 	if rf.gotMajorityVote() {
-		rf.initiateNewElection()
+		rf.becomeCandidate()
 	}
 }
 
@@ -97,7 +97,7 @@ func (rf *Raft) PreVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 		return
 	}
 	if args.Term > rf.currentTerm {
-		rf.changeToFollower(args.Term)
+		rf.becomeFollower(args.Term)
 	}
 	if !args.AsUpToDateAs(lastLogTerm, lastLogIdx) {
 		return

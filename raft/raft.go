@@ -332,7 +332,7 @@ func (rf *Raft) randElectionTimeout() int64 {
 }
 
 // outer lock
-func (rf *Raft) changeToFollower(term int) {
+func (rf *Raft) becomeFollower(term int) {
 	from := rf.desc()
 	rf.role = follower
 	rf.currentTerm = term
@@ -343,7 +343,7 @@ func (rf *Raft) changeToFollower(term int) {
 	logrus.Infof("%s -> %s", from, rf.desc())
 }
 
-func (rf *Raft) initiateNewElection() {
+func (rf *Raft) becomeCandidate() {
 	defer rf.persist()
 	from := rf.desc()
 	rf.role = candidate
@@ -356,7 +356,7 @@ func (rf *Raft) initiateNewElection() {
 	rf.votedFor = rf.me
 	rf.voteGot[rf.me] = true
 	if rf.gotMajorityVote() {
-		rf.changeToLeader()
+		rf.becomeLeader()
 		return
 	}
 
@@ -368,7 +368,7 @@ func (rf *Raft) initiateNewElection() {
 	}
 }
 
-func (rf *Raft) changeToLeader() {
+func (rf *Raft) becomeLeader() {
 	logrus.Infof("%s -> leader", rf.desc())
 	rf.role = leader
 	rf.leaderState = &LeaderState{
@@ -504,7 +504,7 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	if rf.role == follower {
 		rf.resetTimeout()
 	} else if rf.role == leader {
-		rf.changeToLeader()
+		rf.becomeLeader()
 	}
 
 	go rf.applyDamon(applyCh)
