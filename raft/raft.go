@@ -316,11 +316,7 @@ func (rf *Raft) becomeLeader() {
 }
 
 func (rf *Raft) waitNewLogEntry(peerID int) {
-	for rf.syncWith(peerID) {
-		//if nowUnixNano()-rf.leaderState.lastHeartbeat[peerID] > int64(heartbeatIntv) {
-		//	logrus.Debugf("%s prepare to send heartbeat to %d", rf.desc(), peerID)
-		//	break
-		//}
+	for rf.synced(peerID) {
 		rf.leaderState.newEntryCond.Wait()
 	}
 }
@@ -364,7 +360,7 @@ func (rf *Raft) getTermByMonoIndex(mi int) int {
 	return 0
 }
 
-func (rf *Raft) syncWith(pid int) bool {
+func (rf *Raft) synced(pid int) bool {
 	_, idx := rf.Log.lastEntryTermIndex()
 	return idx == rf.leaderState.matchIndex[pid]
 }
