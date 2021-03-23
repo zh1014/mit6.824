@@ -36,7 +36,7 @@ type RequestVoteReply struct {
 //
 func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 	rf.mu.Lock()
-	lastLogTerm, lastLogIdx := rf.lastLogTermIndex()
+	lastLogTerm, lastLogIdx := rf.Log.lastEntryTermIndex()
 	defer func() {
 		logrus.Debugf("%s exec RequestVote, lastLog=[Index%d,Term%d], votedFor %d: args=%+v, reply=%+v",
 			rf.desc(), lastLogIdx, lastLogTerm, rf.votedFor, args, reply)
@@ -59,7 +59,7 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 	if !rf.voted() && args.AsUpToDateAs(lastLogTerm, lastLogIdx) {
 		reply.VoteGranted = true
 		rf.votedFor = args.CandidateID
-		rf.markDirty()
+		rf.Dirty.Mark()
 	}
 }
 
@@ -102,7 +102,7 @@ func (rf *Raft) requestVoteFrom(peerID int) {
 		CandidateID: rf.me,
 		CreateTs:    nowUnixNano(),
 	}
-	args.LastLogTerm, args.LastLogIndex = rf.lastLogTermIndex()
+	args.LastLogTerm, args.LastLogIndex = rf.Log.lastEntryTermIndex()
 	logrus.Debugf("%s requestVoteFrom peer%d, args=%+v", rf.desc(), peerID, args)
 	reply := new(RequestVoteReply)
 	ok := rf.RequestVoteRPC(peerID, args, reply)
@@ -132,7 +132,7 @@ func (rf *Raft) requestVoteFrom(peerID int) {
 	if rf.gotMajorityVote() {
 		rf.becomeLeader()
 	}
-	rf.markDirty()
+	rf.Dirty.Mark()
 }
 
 func (rf *Raft) RequestVoteRPC(peerID int, args *RequestVoteArgs, reply *RequestVoteReply) bool {

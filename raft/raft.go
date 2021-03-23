@@ -76,22 +76,17 @@ type Raft struct {
 	dead       int32               // set by Kill()
 	rand       *rand.Rand
 	statusCond *sync.Cond
-	applyCond  *sync.Cond
 
 	mu            sync.Mutex // protect follow fields
 	currentTerm   int
 	role          raftRole
 	votedFor      int
-	elecTimeout   int64
-	log           []*labrpc.LogEntry
-	matchIndex    int
-	commitIndex   int
-	lastApplied   int
-	lastHeartbeat int64
-	snapshotMeta  Snapshot
 	voteGot       []bool // for preCandidate, candidate
+	elecTimeout   int64
+	lastHeartbeat int64
+	Log           *Log
 	leaderState   *LeaderState
-	dirty         bool
+	Dirty
 }
 
 type LeaderState struct {
@@ -101,10 +96,6 @@ type LeaderState struct {
 	lastHeartbeat []int64
 }
 
-type CandidateState struct {
-	voteGot []bool
-}
-
 func (l *LeaderState) needHeartbeat(peerID int) bool {
 	return nowUnixNano()-l.lastHeartbeat[peerID] > int64(heartbeatIntv)
 }
@@ -112,6 +103,10 @@ func (l *LeaderState) needHeartbeat(peerID int) bool {
 // outer lock
 func (rf *Raft) resetTimeout() {
 	rf.elecTimeout = nowUnixNano() + rf.randElectionTimeout()
+}
+
+func (rf *Raft) timeout() bool {
+	return nowUnixNano() > rf.elecTimeout
 }
 
 func (rf *Raft) ticker() {
@@ -124,7 +119,7 @@ func (rf *Raft) ticker() {
 			break
 		}
 		rf.mu.Lock()
-		if nowUnixNano() > rf.elecTimeout && rf.role != leader {
+		if rf.role != leader && rf.timeout() {
 			rf.becomePreCandidate()
 		}
 		if rf.role == leader {
@@ -154,57 +149,6 @@ func (rf *Raft) voted() bool {
 	return rf.votedFor >= 0
 }
 
-// outer lock
-func (rf *Raft) lastLogTermIndex() (term, idx int) {
-	lenLog := len(rf.log)
-	if lenLog == 0 {
-		term, idx = rf.snapshotMeta.lastIncludeTerm, rf.snapshotMeta.lastIncluded
-		return
-	}
-
-	lastLog := rf.log[lenLog-1]
-	term = lastLog.Term
-	idx = rf.snapshotMeta.lastIncluded + lenLog
-	return
-}
-
-// 只能提交leader已经提交，且肯定与leader匹配的部分LogEntry
-func (rf *Raft) updateCommitIdx(leaderCommit int) {
-	commit := min(leaderCommit, rf.matchIndex)
-	if commit > rf.commitIndex {
-		logrus.Debugf("%s update commitIndex %v, log=%s", rf.desc(), commit, rf.StringLog())
-		rf.commitIndex = commit
-		rf.applyCond.Signal()
-		rf.markDirty()
-	}
-}
-
-func (rf *Raft) updateMatchIndex(args *AppendEntryArgs) {
-	match := args.PrevLogIndex + len(args.Entries)
-	if match > rf.matchIndex {
-		rf.matchIndex = match
-	}
-}
-
-func (rf *Raft) StringLog() string {
-	const display = 3
-	if len(rf.log) <= display {
-		return entriesString(rf.snapshotMeta.lastIncluded+1, rf.log)
-	}
-	start := len(rf.log) - display
-	startMonoIdx := rf.snapshotMeta.lastIncluded + start + 1
-	return "..." + entriesString(startMonoIdx, rf.log[start:])
-}
-
-func (rf *Raft) appendEntry(command interface{}) {
-	rf.log = append(rf.log, &labrpc.LogEntry{
-		Term: rf.currentTerm,
-		Cmd:  command,
-	})
-	rf.markDirty()
-	//rf.printLog()
-}
-
 func (rf *Raft) printLog() {
 	//logrus.Debugf("%s printLog, log=%v", rf.desc(), entriesString(rf.log))
 }
@@ -217,58 +161,6 @@ func (rf *Raft) desc() string {
 	}
 	desc += "]"
 	return desc
-}
-
-// 根据 单增索引 在log中查找对应条目，返回实际位置
-// 返回值小于0，则log中没找到
-// 返回值等于 -1， 时代表刚好是上一个apply的条目
-// outer lock
-func (rf *Raft) findEntryWithTerm(idx, term int) int {
-	realIndex := (idx - rf.snapshotMeta.lastIncluded) - 1
-	if realIndex >= len(rf.log) {
-		return -2
-	}
-	if realIndex == -1 && term != rf.snapshotMeta.lastIncludeTerm {
-		realIndex = -2
-	}
-	if realIndex >= 0 && rf.log[realIndex].Term != term {
-		realIndex = -2
-	}
-	return realIndex
-}
-
-func (rf *Raft) findEntry(monoIdx int) *labrpc.LogEntry {
-	realIndex := rf.getRealIndex(monoIdx)
-	if realIndex < 0 || realIndex >= len(rf.log) {
-		return nil
-	}
-	return rf.log[realIndex]
-}
-
-func (rf *Raft) getRealIndex(monoIdx int) int {
-	return (monoIdx - rf.snapshotMeta.lastIncluded) - 1
-}
-
-// 查找某个term的末尾entry，返回其单增索引. 找不到则返回 -1
-func (rf *Raft) lastIndexOfTerm(t int) int {
-	idx := 0
-	for i := len(rf.log) - 1; i >= 0; i-- {
-		if rf.log[i].Term == t {
-			idx = rf.getMonoIndex(i)
-			break
-		}
-	}
-	if idx == 0 && rf.snapshotMeta.lastIncludeTerm == t {
-		idx = rf.snapshotMeta.lastIncluded
-	}
-	return idx
-}
-
-func (rf *Raft) getMonoIndex(ri int) int {
-	if ri < 0 {
-		panic(fmt.Sprintf("getMonoIndex: ri=%v", ri))
-	}
-	return rf.snapshotMeta.lastIncluded + ri + 1
 }
 
 //
@@ -297,13 +189,22 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 	}
 	logrus.Debugf("%s Start(%v)", rf.desc(), command)
 	rf.appendEntry(command)
-	term, index = rf.lastLogTermIndex()
+	term, index = rf.Log.lastEntryTermIndex()
 	rf.leaderState.matchIndex[rf.me] = index
 	rf.leaderState.newEntryCond.Broadcast()
-	if len(rf.log) > snapshotTriggerCond {
+	if rf.Log.Len() > snapshotTriggerCond {
 		rf.snapshot()
 	}
 	return index, term, true
+}
+
+func (rf *Raft) appendEntry(command interface{}) {
+	rf.Log.slice = append(rf.Log.slice, &labrpc.LogEntry{
+		Term: rf.currentTerm,
+		Cmd:  command,
+	})
+	rf.Dirty.Mark()
+	//rf.printLog()
 }
 
 //
@@ -337,10 +238,34 @@ func (rf *Raft) becomeFollower(term int) {
 	rf.role = follower
 	rf.currentTerm = term
 	rf.votedFor = -1
-	rf.matchIndex = 0
+	rf.Log.matchIndex = 0
 	rf.resetTimeout()
-	rf.markDirty()
+	rf.Dirty.Mark()
 	logrus.Infof("%s -> %s", from, rf.desc())
+}
+
+func (rf *Raft) becomePreCandidate() {
+	defer rf.persist()
+	from := rf.desc()
+	rf.role = preCandidate
+	rf.resetTimeout()
+	logrus.Infof("%s -> %s", from, rf.desc())
+	rf.voteGot = make([]bool, len(rf.peers))
+
+	// vote for self
+	rf.votedFor = rf.me
+	rf.voteGot[rf.me] = true
+	if rf.gotMajorityVote() {
+		rf.becomeCandidate()
+		return
+	}
+
+	for i := range rf.peers {
+		if i == rf.me {
+			continue
+		}
+		go rf.requestPreVoteFrom(i)
+	}
 }
 
 func (rf *Raft) becomeCandidate() {
@@ -378,7 +303,7 @@ func (rf *Raft) becomeLeader() {
 		newEntryCond:  sync.NewCond(&rf.mu),
 	}
 	for i := range rf.leaderState.nextIndex {
-		rf.leaderState.nextIndex[i] = rf.getMonoIndex(len(rf.log))
+		rf.leaderState.nextIndex[i] = rf.Log.getMonoIndex(rf.Log.Len())
 	}
 
 	for peerID := range rf.peers {
@@ -387,27 +312,7 @@ func (rf *Raft) becomeLeader() {
 		}
 		go rf.syncLogEntriesTo(peerID)
 	}
-	rf.markDirty()
-}
-
-func (rf *Raft) findMatchQuickly(args *AppendEntryArgs, reply *AppendEntryReply) int {
-	var realIndex int
-	if reply.LastIndexOfTerm > 0 {
-		// 快速获取match位置. 直接定位到对方的args.PrevLogTerm的最后一条的LogEntry
-		realIndex = rf.findEntryWithTerm(reply.LastIndexOfTerm, args.PrevLogTerm)
-	} else {
-		// 获取可能match的位置. 获取最后一条term小于args.PrevLogTerm的LogEntry
-		realIndex = len(rf.log) - 1
-		for ; realIndex >= 0; realIndex-- {
-			if rf.log[realIndex].Term < args.PrevLogTerm {
-				break
-			}
-		}
-		if realIndex == -1 && rf.snapshotMeta.lastIncludeTerm == args.PrevLogTerm {
-			realIndex--
-		}
-	}
-	return realIndex
+	rf.Dirty.Mark()
 }
 
 func (rf *Raft) waitNewLogEntry(peerID int) {
@@ -436,10 +341,10 @@ func (rf *Raft) checkCommit() {
 		middle = len(sortedMatch) / 2
 	}
 	medianMatch := sortedMatch[middle]
-	if medianMatch > rf.commitIndex && rf.findEntry(medianMatch).Term == rf.currentTerm {
-		rf.commitIndex = medianMatch
-		rf.applyCond.Signal()
-		logrus.Infof("%s checkCommit, update commitIndex %d, log=%s", rf.desc(), rf.commitIndex, rf.StringLog())
+	if medianMatch > rf.Log.commitIndex && rf.Log.findEntry(medianMatch).Term == rf.currentTerm {
+		rf.Log.commitIndex = medianMatch
+		rf.Log.applyCond.Signal()
+		logrus.Infof("%s checkCommit, update commitIndex %d, log=%s", rf.desc(), rf.Log.commitIndex, rf.Log.StringLog())
 	}
 }
 
@@ -450,34 +355,34 @@ func (rf *Raft) getTermByMonoIndex(mi int) int {
 		return 0
 	}
 
-	if e := rf.findEntry(mi); e != nil {
+	if e := rf.Log.findEntry(mi); e != nil {
 		return e.Term
 	}
-	if mi == rf.snapshotMeta.lastIncluded {
-		return rf.snapshotMeta.lastIncludeTerm
+	if mi == rf.Log.lastIncluded {
+		return rf.Log.lastIncludeTerm
 	}
 	return 0
 }
 
 func (rf *Raft) syncWith(pid int) bool {
-	_, idx := rf.lastLogTermIndex()
+	_, idx := rf.Log.lastEntryTermIndex()
 	return idx == rf.leaderState.matchIndex[pid]
 }
 
 func (rf *Raft) containsEntry(i, t int) bool {
-	return rf.findEntryWithTerm(i, t) >= -1
+	return rf.Log.findEntryWithTerm(i, t) >= -1
 }
 
 // 根据 单增索引 和 term 找到前一个entry的 单增索引 和 term
 func (rf *Raft) getPreEntry(i, t int) (int, int) {
-	ri := rf.findEntryWithTerm(i, t)
+	ri := rf.Log.findEntryWithTerm(i, t)
 	if ri <= -1 {
 		return ri, -1
 	}
 	if ri == 0 {
-		return rf.snapshotMeta.lastIncluded, rf.snapshotMeta.lastIncludeTerm
+		return rf.Log.lastIncluded, rf.Log.lastIncludeTerm
 	}
-	return rf.getMonoIndex(ri - 1), rf.log[ri-1].Term
+	return rf.Log.getMonoIndex(ri - 1), rf.Log.slice[ri-1].Term
 }
 
 // the service or tester wants to create a Raft server. the ports
@@ -496,7 +401,9 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	rf.persister = persister
 	rf.me = me
 	rf.rand = rand.New(rand.NewSource(time.Now().UnixNano()))
-	rf.applyCond = sync.NewCond(&rf.mu)
+	rf.Log = &Log{
+		applyCond: sync.NewCond(&rf.mu),
+	}
 
 	if rawData := persister.ReadRaftState(); len(rawData) > 0 {
 		rf.readPersist(rawData)
@@ -515,20 +422,15 @@ func Make(peers []*labrpc.ClientEnd, me int,
 func (rf *Raft) applyDamon(applyCh chan ApplyMsg) {
 	rf.mu.Lock()
 	for {
-		for rf.lastApplied == rf.commitIndex {
-			rf.applyCond.Wait()
+		for !rf.Log.canApply() {
+			rf.Log.applyCond.Wait()
 		}
 		if rf.killed() {
 			break
 		}
 
-		for rf.lastApplied < rf.commitIndex {
-			rf.lastApplied++
-			msg := ApplyMsg{
-				CommandValid: true,
-				Command:      rf.log[rf.getRealIndex(rf.lastApplied)].Cmd,
-				CommandIndex: rf.lastApplied,
-			}
+		for rf.Log.canApply() {
+			msg := rf.Log.applyNextCmd()
 			//logrus.Debugf("%s applying msg=%+v", rf.desc(), msg)
 			rf.mu.Unlock()
 			applyCh <- msg
@@ -544,9 +446,9 @@ func (rf *Raft) applyDamon(applyCh chan ApplyMsg) {
 }
 
 func (rf *Raft) snapshot() {
-	ri := rf.getRealIndex(rf.lastApplied)
+	ri := rf.Log.getRealIndex(rf.Log.lastApplied)
 	if ri < 0 {
-		logrus.Debugf("%s snapshot failed, len=%d, ri=%d, lastApplied=%v", rf.desc(), len(rf.log), ri, rf.lastApplied)
+		logrus.Debugf("%s snapshot failed, len=%d, ri=%d, lastApplied=%v", rf.desc(), rf.Log.Len(), ri, rf.Log.lastApplied)
 		return
 	}
 	// TODO howZ

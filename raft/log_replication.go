@@ -51,7 +51,7 @@ func (rf *Raft) AppendEntry(args *AppendEntryArgs, reply *AppendEntryReply) {
 		return
 	}
 
-	defer rf.updateCommitIdx(args.LeaderCommit) // 收到leader（term不小于自己）的消息，就可能更新 commitIndex
+	defer rf.Log.updateCommitIdx(args.LeaderCommit) // 收到leader（term不小于自己）的消息，就可能更新 commitIndex
 	rf.lastHeartbeat = nowUnixNano()
 	rf.resetTimeout()
 	if (args.Term == rf.currentTerm && rf.role != follower) || args.Term > rf.currentTerm {
@@ -60,39 +60,20 @@ func (rf *Raft) AppendEntry(args *AppendEntryArgs, reply *AppendEntryReply) {
 
 	var realIdxStart int // 从log中的start开始合并
 	if args.PrevLogIndex > 0 {
-		realIdxStart = rf.findEntryWithTerm(args.PrevLogIndex, args.PrevLogTerm) + 1
+		realIdxStart = rf.Log.findEntryWithTerm(args.PrevLogIndex, args.PrevLogTerm) + 1
 	}
 	if realIdxStart < 0 {
 		reply.Success = false
-		reply.LastIndexOfTerm = rf.lastIndexOfTerm(args.PrevLogTerm)
+		reply.LastIndexOfTerm = rf.Log.lastIndexOfTerm(args.PrevLogTerm)
 		//logrus.Debugf("%s exec AppendEntry, log=%v", rf.desc(), rf.entriesString())
 		return
 	}
-	rf.updateMatchIndex(args) // 只要PrevLog匹配成功，就可能更新matchIndex
-	rf.appendEntries(realIdxStart, args.Entries)
-	if len(rf.log) > snapshotTriggerCond {
+	rf.Log.updateMatchIndex(args) // 只要PrevLog匹配成功，就可能更新matchIndex
+	rf.Log.appendEntries(realIdxStart, args.Entries)
+	if len(rf.Log.slice) > snapshotTriggerCond {
 		rf.snapshot()
 	}
 	reply.Success = true
-}
-
-func (rf *Raft) appendEntries(start int, entries []*labrpc.LogEntry) {
-	if len(entries) == 0 {
-		return
-	}
-	for i, entry := range entries {
-		if start+i >= len(rf.log) {
-			rf.log = append(rf.log, entries[i:]...)
-			break
-		}
-		if entry.Term != rf.log[start+i].Term {
-			rf.log = rf.log[:start+i]
-			rf.log = append(rf.log, entries[i:]...)
-			break
-		}
-	}
-	rf.markDirty()
-	//rf.printLog()
 }
 
 func (rf *Raft) AppendEntryRPC(peerID int, args *AppendEntryArgs, reply *AppendEntryReply) bool {
@@ -114,11 +95,11 @@ func (rf *Raft) syncLogEntriesTo(peerID int) {
 		Term:     rf.currentTerm,
 		LeaderID: rf.me,
 	}
-	args.PrevLogTerm, args.PrevLogIndex = rf.lastLogTermIndex()
+	args.PrevLogTerm, args.PrevLogIndex = rf.Log.lastEntryTermIndex()
 
 	for {
 		rf.leaderState.lastHeartbeat[peerID] = nowUnixNano()
-		args.LeaderCommit = rf.commitIndex
+		args.LeaderCommit = rf.Log.commitIndex
 		args.CreateTs = nowUnixNano()
 		reply := &AppendEntryReply{}
 		logrus.Debugf("%s AppendEntry to peer%d, args=%s", rf.desc(), peerID, args)
@@ -153,20 +134,20 @@ func (rf *Raft) syncLogEntriesTo(peerID int) {
 				break
 			}
 
-			realIndexMatch = rf.getRealIndex(rf.leaderState.matchIndex[peerID])
+			realIndexMatch = rf.Log.getRealIndex(rf.leaderState.matchIndex[peerID])
 		} else {
-			realIndexMatch = rf.findMatchQuickly(args, reply)
+			realIndexMatch = rf.Log.findMatchQuickly(args, reply)
 		}
 		if realIndexMatch <= realIndexInvalid {
 			rf.sendSnapshotTo(peerID)
 		} else if realIndexMatch == realIndexLastApplied {
-			args.PrevLogIndex = rf.snapshotMeta.lastIncluded
-			args.PrevLogTerm = rf.snapshotMeta.lastIncludeTerm
+			args.PrevLogIndex = rf.Log.lastIncluded
+			args.PrevLogTerm = rf.Log.lastIncludeTerm
 		} else {
-			args.PrevLogIndex = rf.getMonoIndex(realIndexMatch)
-			args.PrevLogTerm = rf.log[realIndexMatch].Term
+			args.PrevLogIndex = rf.Log.getMonoIndex(realIndexMatch)
+			args.PrevLogTerm = rf.Log.slice[realIndexMatch].Term
 		}
-		args.Entries = rf.log[realIndexMatch+1:]
+		args.Entries = rf.Log.slice[realIndexMatch+1:]
 	}
 }
 
@@ -193,19 +174,19 @@ func (rf *Raft) sendHeartbeatTo(peerID int) {
 	args := &AppendEntryArgs{
 		Term:         rf.currentTerm,
 		LeaderID:     rf.me,
-		LeaderCommit: rf.commitIndex,
+		LeaderCommit: rf.Log.commitIndex,
 		CreateTs:     now,
 	}
-	realIndexMatch := rf.getRealIndex(rf.leaderState.matchIndex[peerID])
+	realIndexMatch := rf.Log.getRealIndex(rf.leaderState.matchIndex[peerID])
 	if realIndexMatch <= realIndexInvalid {
 		rf.sendSnapshotTo(peerID)
-		args.PrevLogTerm, args.PrevLogIndex = rf.lastLogTermIndex()
+		args.PrevLogTerm, args.PrevLogIndex = rf.Log.lastEntryTermIndex()
 	} else if realIndexMatch == realIndexLastApplied {
-		args.PrevLogIndex = rf.snapshotMeta.lastIncluded
-		args.PrevLogTerm = rf.snapshotMeta.lastIncludeTerm
+		args.PrevLogIndex = rf.Log.lastIncluded
+		args.PrevLogTerm = rf.Log.lastIncludeTerm
 	} else {
-		args.PrevLogIndex = rf.getMonoIndex(realIndexMatch)
-		args.PrevLogTerm = rf.log[realIndexMatch].Term
+		args.PrevLogIndex = rf.Log.getMonoIndex(realIndexMatch)
+		args.PrevLogTerm = rf.Log.slice[realIndexMatch].Term
 	}
 	reply := &AppendEntryReply{}
 	logrus.Debugf("%s sendHeartbeatTo to peer%d, args=%s", rf.desc(), peerID, args)

@@ -5,30 +5,6 @@ import (
 	"time"
 )
 
-func (rf *Raft) becomePreCandidate() {
-	defer rf.persist()
-	from := rf.desc()
-	rf.role = preCandidate
-	rf.resetTimeout()
-	logrus.Infof("%s -> %s", from, rf.desc())
-	rf.voteGot = make([]bool, len(rf.peers))
-
-	// vote for self
-	rf.votedFor = rf.me
-	rf.voteGot[rf.me] = true
-	if rf.gotMajorityVote() {
-		rf.becomeCandidate()
-		return
-	}
-
-	for i := range rf.peers {
-		if i == rf.me {
-			continue
-		}
-		go rf.requestPreVoteFrom(i)
-	}
-}
-
 func (rf *Raft) requestPreVoteFrom(peerID int) {
 	rf.mu.Lock()
 	defer rf.mu.Unlock()
@@ -39,7 +15,7 @@ func (rf *Raft) requestPreVoteFrom(peerID int) {
 		CandidateID: rf.me,
 		CreateTs:    nowUnixNano(),
 	}
-	args.LastLogTerm, args.LastLogIndex = rf.lastLogTermIndex()
+	args.LastLogTerm, args.LastLogIndex = rf.Log.lastEntryTermIndex()
 	logrus.Debugf("%s requestPreVoteFrom peer%d, args=%+v", rf.desc(), peerID, args)
 	reply := new(RequestVoteReply)
 	ok := rf.PreVoteRPC(peerID, args, reply)
@@ -66,7 +42,7 @@ func (rf *Raft) requestPreVoteFrom(peerID int) {
 		return
 	}
 	rf.voteGot[peerID] = true
-	rf.markDirty()
+	rf.Dirty.Mark()
 	if rf.gotMajorityVote() {
 		rf.becomeCandidate()
 	}
@@ -83,7 +59,7 @@ func (rf *Raft) PreVoteRPC(peerID int, args *RequestVoteArgs, reply *RequestVote
 
 func (rf *Raft) PreVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 	rf.mu.Lock()
-	lastLogTerm, lastLogIdx := rf.lastLogTermIndex()
+	lastLogTerm, lastLogIdx := rf.Log.lastEntryTermIndex()
 	defer func() {
 		logrus.Debugf("%s exec PreVote, lastLog=[Index%d,Term%d], args=%+v, reply=%+v",
 			rf.desc(), lastLogIdx, lastLogTerm, args, reply)

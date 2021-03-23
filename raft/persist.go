@@ -16,13 +16,13 @@ func (rf *Raft) persist() {
 	e.Encode(rf.currentTerm)
 	e.Encode(rf.role)
 	e.Encode(rf.votedFor)
-	e.Encode(rf.log)
-	e.Encode(rf.snapshotMeta.lastIncluded)
-	e.Encode(rf.snapshotMeta.lastIncludeTerm)
+	e.Encode(rf.Log.slice)
+	e.Encode(rf.Log.lastIncluded)
+	e.Encode(rf.Log.lastIncludeTerm)
 	e.Encode(rf.voteGot)
 	data := w.Bytes()
 	rf.persister.SaveRaftState(data)
-	rf.wipeDirty()
+	rf.Dirty.Wipe()
 }
 
 //
@@ -37,30 +37,34 @@ func (rf *Raft) readPersist(data []byte) {
 	checkErr(err)
 	err = d.Decode(&rf.votedFor)
 	checkErr(err)
-	err = d.Decode(&rf.log)
+	err = d.Decode(&rf.Log.slice)
 	checkErr(err)
-	err = d.Decode(&rf.snapshotMeta.lastIncluded)
+	err = d.Decode(&rf.Log.lastIncluded)
 	checkErr(err)
-	err = d.Decode(&rf.snapshotMeta.lastIncludeTerm)
+	err = d.Decode(&rf.Log.lastIncludeTerm)
 	checkErr(err)
 	err = d.Decode(&rf.voteGot)
 	checkErr(err)
 }
 
-func (rf *Raft) markDirty() {
-	rf.dirty = true
-}
-
-func (rf *Raft) wipeDirty() {
-	rf.dirty = false
-}
-
-func (rf *Raft) isDirty() bool {
-	return rf.dirty
-}
-
 func (rf *Raft) persistIfDirty() {
-	if rf.isDirty() {
+	if rf.Marked() || rf.Log.Marked() {
 		rf.persist()
 	}
+}
+
+type Dirty struct {
+	marked bool
+}
+
+func (d *Dirty) Mark() {
+	d.marked = true
+}
+
+func (d *Dirty) Wipe() {
+	d.marked = false
+}
+
+func (d *Dirty) Marked() bool {
+	return d.marked
 }

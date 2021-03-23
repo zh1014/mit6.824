@@ -2,11 +2,6 @@ package raft
 
 import "github.com/sirupsen/logrus"
 
-type Snapshot struct {
-	lastIncluded    int
-	lastIncludeTerm int
-}
-
 type InstallSnapshotArgs struct {
 }
 
