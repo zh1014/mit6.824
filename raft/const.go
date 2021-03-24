@@ -11,7 +11,4 @@ const (
 
 	logOutput = "/Users/zhanghao1/code/6.824/raft/raft.log"
 	//logOutput = ""
-
-	realIndexLastApplied = -1
-	realIndexInvalid     = -2
 )

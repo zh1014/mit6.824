@@ -22,7 +22,7 @@ func (rf *Raft) persist() {
 	e.Encode(rf.voteGot)
 	data := w.Bytes()
 	rf.persister.SaveRaftState(data)
-	rf.Dirty.Wipe()
+	rf.WipeDirty()
 }
 
 //
@@ -48,7 +48,7 @@ func (rf *Raft) readPersist(data []byte) {
 }
 
 func (rf *Raft) persistIfDirty() {
-	if rf.Marked() || rf.Log.Marked() {
+	if rf.IsDirty() || rf.Log.IsDirty() {
 		rf.persist()
 	}
 }
@@ -57,14 +57,14 @@ type Dirty struct {
 	marked bool
 }
 
-func (d *Dirty) Mark() {
+func (d *Dirty) MarkDirty() {
 	d.marked = true
 }
 
-func (d *Dirty) Wipe() {
+func (d *Dirty) WipeDirty() {
 	d.marked = false
 }
 
-func (d *Dirty) Marked() bool {
+func (d *Dirty) IsDirty() bool {
 	return d.marked
 }

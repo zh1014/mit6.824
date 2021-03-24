@@ -35,13 +35,12 @@ type RequestVoteReply struct {
 // example RequestVote RPC handler.
 //
 func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
-	rf.mu.Lock()
+	rf.Lock()
 	lastLogTerm, lastLogIdx := rf.Log.lastEntryTermIndex()
 	defer func() {
 		logrus.Debugf("%s exec RequestVote, lastLog=[Index%d,Term%d], votedFor %d: args=%+v, reply=%+v",
 			rf.desc(), lastLogIdx, lastLogTerm, rf.votedFor, args, reply)
-		rf.persistIfDirty()
-		rf.mu.Unlock()
+		rf.Unlock()
 	}()
 
 	reply.Term = rf.currentTerm
@@ -59,7 +58,7 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 	if !rf.voted() && args.AsUpToDateAs(lastLogTerm, lastLogIdx) {
 		reply.VoteGranted = true
 		rf.votedFor = args.CandidateID
-		rf.Dirty.Mark()
+		rf.MarkDirty()
 	}
 }
 
@@ -93,9 +92,8 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 // the struct itself.
 //
 func (rf *Raft) requestVoteFrom(peerID int) {
-	rf.mu.Lock()
-	defer rf.mu.Unlock()
-	defer rf.persistIfDirty()
+	rf.Lock()
+	defer rf.Unlock()
 
 	args := &RequestVoteArgs{
 		Term:        rf.currentTerm,
@@ -132,15 +130,15 @@ func (rf *Raft) requestVoteFrom(peerID int) {
 	if rf.gotMajorityVote() {
 		rf.becomeLeader()
 	}
-	rf.Dirty.Mark()
+	rf.MarkDirty()
 }
 
 func (rf *Raft) RequestVoteRPC(peerID int, args *RequestVoteArgs, reply *RequestVoteReply) bool {
-	rf.mu.Unlock()
+	rf.Unlock()
 	start := time.Now()
 	ok := rf.peers[peerID].Call("Raft.RequestVote", args, reply)
 	logrus.Debugf("RequestVoteRPC CreateTs %d, cost %v", args.CreateTs, time.Now().Sub(start))
-	rf.mu.Lock()
+	rf.Lock()
 	return ok
 }
 

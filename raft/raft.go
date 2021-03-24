@@ -77,7 +77,7 @@ type Raft struct {
 	rand       *rand.Rand
 	statusCond *sync.Cond
 
-	mu            sync.Mutex // protect follow fields
+	sync.Mutex    // protect follow fields
 	currentTerm   int
 	role          raftRole
 	votedFor      int
@@ -100,6 +100,11 @@ func (l *LeaderState) needHeartbeat(peerID int) bool {
 	return nowUnixNano()-l.lastHeartbeat[peerID] > int64(heartbeatIntv)
 }
 
+func (rf *Raft) Unlock() {
+	rf.persistIfDirty()
+	rf.Mutex.Unlock()
+}
+
 // outer lock
 func (rf *Raft) resetTimeout() {
 	rf.elecTimeout = nowUnixNano() + rf.randElectionTimeout()
@@ -118,7 +123,7 @@ func (rf *Raft) ticker() {
 		if rf.killed() {
 			break
 		}
-		rf.mu.Lock()
+		rf.Lock()
 		if rf.role != leader && rf.timeout() {
 			rf.becomePreCandidate()
 		}
@@ -133,15 +138,15 @@ func (rf *Raft) ticker() {
 				go rf.sendHeartbeatTo(peerID)
 			}
 		}
-		rf.mu.Unlock()
+		rf.Unlock()
 	}
 }
 
 // return currentTerm and whether this server
 // believes it is the leader.
 func (rf *Raft) GetState() (int, bool) {
-	rf.mu.Lock()
-	defer rf.mu.Unlock()
+	rf.Lock()
+	defer rf.Unlock()
 	return rf.currentTerm, rf.role == leader
 }
 
@@ -178,9 +183,8 @@ func (rf *Raft) desc() string {
 // the leader.
 //
 func (rf *Raft) Start(command interface{}) (int, int, bool) {
-	rf.mu.Lock()
-	defer rf.mu.Unlock()
-	defer rf.persistIfDirty()
+	rf.Lock()
+	defer rf.Unlock()
 
 	index := -1
 	term := -1
@@ -203,7 +207,7 @@ func (rf *Raft) appendEntry(command interface{}) {
 		Term: rf.currentTerm,
 		Cmd:  command,
 	})
-	rf.Dirty.Mark()
+	rf.MarkDirty()
 	//rf.printLog()
 }
 
@@ -234,18 +238,18 @@ func (rf *Raft) randElectionTimeout() int64 {
 
 // outer lock
 func (rf *Raft) becomeFollower(term int) {
+	rf.MarkDirty()
 	from := rf.desc()
 	rf.role = follower
 	rf.currentTerm = term
 	rf.votedFor = -1
 	rf.Log.matchIndex = 0
 	rf.resetTimeout()
-	rf.Dirty.Mark()
 	logrus.Infof("%s -> %s", from, rf.desc())
 }
 
 func (rf *Raft) becomePreCandidate() {
-	defer rf.persist()
+	rf.MarkDirty()
 	from := rf.desc()
 	rf.role = preCandidate
 	rf.resetTimeout()
@@ -269,7 +273,7 @@ func (rf *Raft) becomePreCandidate() {
 }
 
 func (rf *Raft) becomeCandidate() {
-	defer rf.persist()
+	rf.MarkDirty()
 	from := rf.desc()
 	rf.role = candidate
 	rf.currentTerm++
@@ -294,16 +298,17 @@ func (rf *Raft) becomeCandidate() {
 }
 
 func (rf *Raft) becomeLeader() {
+	rf.MarkDirty()
 	logrus.Infof("%s -> leader", rf.desc())
 	rf.role = leader
 	rf.leaderState = &LeaderState{
 		nextIndex:     make([]int, len(rf.peers)),
 		matchIndex:    make([]int, len(rf.peers)),
 		lastHeartbeat: make([]int64, len(rf.peers)),
-		newEntryCond:  sync.NewCond(&rf.mu),
+		newEntryCond:  sync.NewCond(rf),
 	}
 	for i := range rf.leaderState.nextIndex {
-		rf.leaderState.nextIndex[i] = rf.Log.getMonoIndex(rf.Log.Len())
+		rf.leaderState.nextIndex[i] = rf.Log.RToM(rf.Log.Len())
 	}
 
 	for peerID := range rf.peers {
@@ -312,7 +317,6 @@ func (rf *Raft) becomeLeader() {
 		}
 		go rf.syncLogEntriesTo(peerID)
 	}
-	rf.Dirty.Mark()
 }
 
 func (rf *Raft) waitNewLogEntry(peerID int) {
@@ -339,46 +343,15 @@ func (rf *Raft) checkCommit() {
 	medianMatch := sortedMatch[middle]
 	if medianMatch > rf.Log.commitIndex && rf.Log.findEntry(medianMatch).Term == rf.currentTerm {
 		rf.Log.commitIndex = medianMatch
+		rf.Log.MarkDirty()
 		rf.Log.applyCond.Signal()
 		logrus.Infof("%s checkCommit, update commitIndex %d, log=%s", rf.desc(), rf.Log.commitIndex, rf.Log.StringLog())
 	}
 }
 
-// 查找MonoIndex对应Entry的Term
-// 没找到Entry则返回0
-func (rf *Raft) getTermByMonoIndex(mi int) int {
-	if mi <= 0 {
-		return 0
-	}
-
-	if e := rf.Log.findEntry(mi); e != nil {
-		return e.Term
-	}
-	if mi == rf.Log.lastIncluded {
-		return rf.Log.lastIncludeTerm
-	}
-	return 0
-}
-
 func (rf *Raft) synced(pid int) bool {
 	_, idx := rf.Log.lastEntryTermIndex()
 	return idx == rf.leaderState.matchIndex[pid]
-}
-
-func (rf *Raft) containsEntry(i, t int) bool {
-	return rf.Log.findEntryWithTerm(i, t) >= -1
-}
-
-// 根据 单增索引 和 term 找到前一个entry的 单增索引 和 term
-func (rf *Raft) getPreEntry(i, t int) (int, int) {
-	ri := rf.Log.findEntryWithTerm(i, t)
-	if ri <= -1 {
-		return ri, -1
-	}
-	if ri == 0 {
-		return rf.Log.lastIncluded, rf.Log.lastIncludeTerm
-	}
-	return rf.Log.getMonoIndex(ri - 1), rf.Log.slice[ri-1].Term
 }
 
 // the service or tester wants to create a Raft server. the ports
@@ -398,7 +371,7 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	rf.me = me
 	rf.rand = rand.New(rand.NewSource(time.Now().UnixNano()))
 	rf.Log = &Log{
-		applyCond: sync.NewCond(&rf.mu),
+		applyCond: sync.NewCond(rf),
 	}
 
 	if rawData := persister.ReadRaftState(); len(rawData) > 0 {
@@ -416,7 +389,7 @@ func Make(peers []*labrpc.ClientEnd, me int,
 }
 
 func (rf *Raft) applyDamon(applyCh chan ApplyMsg) {
-	rf.mu.Lock()
+	rf.Lock()
 	for {
 		for !rf.Log.canApply() {
 			rf.Log.applyCond.Wait()
@@ -426,23 +399,22 @@ func (rf *Raft) applyDamon(applyCh chan ApplyMsg) {
 		}
 
 		for rf.Log.canApply() {
-			msg := rf.Log.applyNextCmd()
+			msg := rf.Log.applyOne()
 			//logrus.Debugf("%s applying msg=%+v", rf.desc(), msg)
-			rf.mu.Unlock()
+			rf.Unlock()
 			applyCh <- msg
-			rf.mu.Lock()
+			rf.Lock()
 			if rf.killed() {
 				break
 			}
-			rf.persist()
 			//logrus.Debugf("%s applied msg=%+v", rf.desc(), msg)
 		}
 	}
-	rf.mu.Unlock()
+	rf.Unlock()
 }
 
 func (rf *Raft) snapshot() {
-	ri := rf.Log.getRealIndex(rf.Log.lastApplied)
+	ri, _ := rf.Log.MToR(rf.Log.lastApplied)
 	if ri < 0 {
 		logrus.Debugf("%s snapshot failed, len=%d, ri=%d, lastApplied=%v", rf.desc(), rf.Log.Len(), ri, rf.Log.lastApplied)
 		return

@@ -1,10 +1,16 @@
 package raft
 
 import (
+	"errors"
 	"fmt"
 	"github.com/sirupsen/logrus"
 	"mit6.824/labrpc"
 	"sync"
+)
+
+const (
+	realIndexLastApplied = -1
+	realIndexInvalid     = -2
 )
 
 type Log struct {
@@ -34,7 +40,7 @@ func (log *Log) appendEntries(start int, entries []*labrpc.LogEntry) {
 			break
 		}
 	}
-	log.Dirty.Mark()
+	log.MarkDirty()
 	//rf.printLog()
 }
 
@@ -49,7 +55,7 @@ func (log *Log) updateCommitIdx(leaderCommit int) {
 		logrus.Debugf("update commitIndex %v, log=%s", commit, log.StringLog())
 		log.commitIndex = commit
 		log.applyCond.Signal()
-		log.Dirty.Mark()
+		log.MarkDirty()
 	}
 }
 
@@ -74,34 +80,27 @@ func (log *Log) lastEntryTermIndex() (term, idx int) {
 	return
 }
 
-// 根据 单增索引 在log中查找对应条目，返回实际位置
-// 返回值小于0，则log中没找到
-// 返回值等于 -1， 时代表刚好是上一个apply的条目
 // outer lock
-func (log *Log) findEntryWithTerm(idx, term int) int {
-	realIndex := (idx - log.lastIncluded) - 1
-	if realIndex >= log.Len() {
-		return -2
+func (log *Log) findEntryWithTerm(idx, term int) (int, error) {
+	ri, err := log.MToR(idx)
+	if err == nil {
+		if log.slice[ri].Term != term {
+			err = NotInLog
+		}
+	} else if err == LastAppliedNotInLog {
+		if log.lastIncludeTerm != term {
+			err = NotInLog
+		}
 	}
-	if realIndex == -1 && term != log.lastIncludeTerm {
-		realIndex = -2
-	}
-	if realIndex >= 0 && log.slice[realIndex].Term != term {
-		realIndex = -2
-	}
-	return realIndex
+	return ri, err
 }
 
 func (log *Log) findEntry(monoIdx int) *labrpc.LogEntry {
-	realIndex := log.getRealIndex(monoIdx)
-	if realIndex < 0 || realIndex >= log.Len() {
+	realIndex, err := log.MToR(monoIdx)
+	if err != nil {
 		return nil
 	}
 	return log.slice[realIndex]
-}
-
-func (log *Log) getRealIndex(monoIdx int) int {
-	return (monoIdx - log.lastIncluded) - 1
 }
 
 // 查找某个term的末尾entry，返回其单增索引. 找不到则返回 -1
@@ -109,7 +108,7 @@ func (log *Log) lastIndexOfTerm(t int) int {
 	idx := 0
 	for i := log.Len() - 1; i >= 0; i-- {
 		if log.slice[i].Term == t {
-			idx = log.getMonoIndex(i)
+			idx = log.RToM(i)
 			break
 		}
 	}
@@ -119,18 +118,53 @@ func (log *Log) lastIndexOfTerm(t int) int {
 	return idx
 }
 
-func (log *Log) getMonoIndex(ri int) int {
+var (
+	NotInLog            = errors.New("log does not contain this monotonically increasing index")
+	LastAppliedNotInLog = errors.New("log at monotonically increasing index is the last applied")
+)
+
+// convert monotonically increasing index to real index
+func (log *Log) MToR(monoIdx int) (int, error) {
+	ri := (monoIdx - log.lastIncluded) - 1
+	if ri == -1 {
+		return -1, LastAppliedNotInLog
+	}
+	if ri < -1 || ri >= log.Len() {
+		return -1, NotInLog
+	}
+	return ri, nil
+}
+
+// convert real index to monotonically increasing index
+func (log *Log) RToM(ri int) int {
 	if ri < 0 {
-		panic(fmt.Sprintf("getMonoIndex: ri=%v", ri))
+		panic(fmt.Sprintf("RToM: ri=%v", ri))
 	}
 	return log.lastIncluded + ri + 1
 }
 
-func (log *Log) applyNextCmd() ApplyMsg {
+// 查找MonoIndex对应Entry的Term
+// 没找到Entry则返回0
+func (log *Log) getTermByMonoIndex(mi int) int {
+	if mi <= 0 {
+		return 0
+	}
+
+	if e := log.findEntry(mi); e != nil {
+		return e.Term
+	}
+	if mi == log.lastIncluded {
+		return log.lastIncludeTerm
+	}
+	return 0
+}
+
+func (log *Log) applyOne() ApplyMsg {
 	log.lastApplied++
+	applying, _ := log.MToR(log.lastApplied)
 	return ApplyMsg{
 		CommandValid: true,
-		Command:      log.slice[log.getRealIndex(log.lastApplied)].Cmd,
+		Command:      log.slice[applying].Cmd,
 		CommandIndex: log.lastApplied,
 	}
 }
@@ -149,22 +183,21 @@ func (log *Log) StringLog() string {
 	return "..." + entriesString(startMonoIdx, log.slice[start:])
 }
 
-func (log *Log) findMatchQuickly(args *AppendEntryArgs, reply *AppendEntryReply) int {
-	var realIndex int
-	if reply.LastIndexOfTerm > 0 {
-		// 快速获取match位置. 直接定位到对方的args.PrevLogTerm的最后一条的LogEntry
-		realIndex = log.findEntryWithTerm(reply.LastIndexOfTerm, args.PrevLogTerm)
-	} else {
-		// 获取可能match的位置. 获取最后一条term小于args.PrevLogTerm的LogEntry
-		realIndex = log.Len() - 1
-		for ; realIndex >= 0; realIndex-- {
-			if log.slice[realIndex].Term < args.PrevLogTerm {
-				break
-			}
-		}
-		if realIndex == -1 && log.lastIncludeTerm == args.PrevLogTerm {
-			realIndex--
+func (log *Log) findEntryTermLess(term int) (int, error) {
+	var ri int
+	var err error
+	ri = log.Len() - 1
+	for ; ri >= 0; ri-- {
+		if log.slice[ri].Term < term {
+			break
 		}
 	}
-	return realIndex
+	if ri == -1 {
+		if log.lastIncludeTerm != term {
+			err = LastAppliedNotInLog
+		} else {
+			err = NotInLog
+		}
+	}
+	return ri, err
 }
