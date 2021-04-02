@@ -42,7 +42,7 @@ type AppendEntryReply struct {
 func (rf *Raft) AppendEntry(args *AppendEntryArgs, reply *AppendEntryReply) {
 	rf.Lock()
 	defer rf.Unlock()
-	logrus.Debugf("%s receive AppendEntry, args=%s", rf.desc(), args)
+	logrus.Debugf("%s receive AppendEntry, args=%s, log=%s", rf.Brief(), args, rf.Log.Brief())
 
 	reply.Term = rf.currentTerm
 	if args.Term < rf.currentTerm {
@@ -63,19 +63,22 @@ func (rf *Raft) AppendEntry(args *AppendEntryArgs, reply *AppendEntryReply) {
 		reply.LastIndexOfTerm = rf.Log.lastIndexOfTerm(args.PrevLogTerm)
 		return
 	}
-	rf.Log.updateMatchIndex(args) // 只要PrevLog匹配成功，就可能更新matchIndex
+	rf.Log.followerUpdateMatchIndex(args) // 只要PrevLog匹配成功，就可能更新matchIndex
 	rf.Log.appendEntries(prev+1, args.Entries)
-	if rf.Log.Len() > snapshotTriggerCond {
-		rf.snapshot()
-	}
 	reply.Success = true
 }
 
 func (rf *Raft) AppendEntryRPC(peerID int, args *AppendEntryArgs, reply *AppendEntryReply) bool {
+	subject := rf.Brief()
+	action := "AppendEntry to"
+	if len(args.Entries) == 0 {
+		action = "SendHeartbeat to"
+	}
+	logrus.Debugf("%s %s peer%d, args=%s", subject, action, peerID, args)
 	rf.Unlock()
 	start := time.Now()
 	ok := rf.peers[peerID].Call("Raft.AppendEntry", args, reply)
-	logrus.Debugf("AppendEntryRPC CreateTs %d, cost %v", args.CreateTs, time.Now().Sub(start))
+	logrus.Debugf("%s %s peer%d [CreateTs:%d,cost:%v,RPC-OK:%v], reply=%+v", subject, action, peerID, args.CreateTs, time.Now().Sub(start), ok, reply)
 	rf.Lock()
 	return ok
 }
@@ -83,82 +86,64 @@ func (rf *Raft) AppendEntryRPC(peerID int, args *AppendEntryArgs, reply *AppendE
 func (rf *Raft) syncLogEntriesTo(peerID int) {
 	rf.Lock()
 	defer rf.Unlock()
-	logrus.Debugf("%s syncLogEntriesTo %d start....", rf.desc(), peerID)
-
-	// the first heartbeat announces the newly elected leader
+	logrus.Debugf("%s syncLogEntriesTo %d start....", rf.Brief(), peerID)
+	var err error
 	args := &AppendEntryArgs{
 		Term:     rf.currentTerm,
 		LeaderID: rf.me,
 	}
-	args.PrevLogTerm, args.PrevLogIndex = rf.Log.lastEntryTermIndex()
-
 	for {
-		// prepare for new AppendEntry RPC
-		rf.leaderState.lastHeartbeat[peerID] = nowUnixNano()
-		args.LeaderCommit = rf.Log.commitIndex
-		args.CreateTs = nowUnixNano()
-
-		reply := &AppendEntryReply{}
-		logrus.Debugf("%s AppendEntry to peer%d, args=%s", rf.desc(), peerID, args)
-		ok := rf.AppendEntryRPC(peerID, args, reply)
-		// peer in bigger term found
-		if reply.Term > rf.currentTerm {
-			logrus.Debugf("%s syncLogEntriesTo [Term%d|Peer%d] end", rf.desc(), reply.Term, peerID)
-			rf.becomeFollower(reply.Term)
+		if err = rf.checkStopSyncLog(args.Term); err != nil {
 			break
 		}
-		if err := rf.checkStopSyncLog(args.Term); err != nil {
-			logrus.Debugf("%s syncLogEntriesTo peer%d end, after AppendEntryRPC: %v", rf.desc(), peerID, err)
-			break
-		}
+		var ok bool
+		ok = rf.Log.prepareNextAppendArgs(peerID, args)
 		if !ok {
-			logrus.Debugf("%s AppendEntry to peer%d RPC failed, CreateTs=%d", rf.desc(), peerID, args.CreateTs)
-			// retry
-			continue
-		}
-
-		logrus.Debugf("%s AppendEntry to peer%d returned, CreateTs=%d, reply=%+v", rf.desc(), peerID, args.CreateTs, reply)
-		if reply.Success {
-			rf.leaderState.nextIndex[peerID] = args.PrevLogIndex + len(args.Entries) + 1
-			rf.leaderState.matchIndex[peerID] = args.PrevLogIndex + len(args.Entries)
-			rf.checkCommit()
-
-			rf.waitNewLogEntry(peerID)
-			if err := rf.checkStopSyncLog(args.Term); err != nil {
-				logrus.Debugf("%s syncLogEntriesTo peer%d end, after waitNewLogEntry: %v", rf.desc(), peerID, err)
+			err = rf.sendSnapshotTo(peerID)
+			if err != nil {
 				break
 			}
+			continue
 		}
-		rf.prepareNextAppend(peerID, args, reply)
+		reply := &AppendEntryReply{}
+		ok = rf.AppendEntryRPC(peerID, args, reply)
+		if !ok {
+			continue // retry
+		}
+		// check should we stop replication (at this term) after a long wait
+		err = rf.checkAppendEntryReturned(args, reply)
+		if err != nil {
+			break
+		}
+		if !reply.Success {
+			// adjust the next index and retry...
+			ok = rf.Log.adjustNextIndex(peerID, args.PrevLogTerm, reply.LastIndexOfTerm)
+			if !ok {
+				// if failed on adjusting, have to send snapshot
+				err = rf.sendSnapshotTo(peerID)
+				if err != nil {
+					// if failed to send snapshot, we can not continue
+					break
+				}
+				continue
+			}
+			continue
+		}
+		rf.Log.leaderUpdateMatchIndex(rf.currentTerm, peerID, args.PrevLogIndex+len(args.Entries))
+		rf.Log.waitNewLogEntry(peerID)
 	}
+	logrus.Debugf("%s syncLogEntriesTo peer%d end: %v", rf.Brief(), peerID, err)
 }
 
-func (rf *Raft) prepareNextAppend(peerID int, args *AppendEntryArgs, reply *AppendEntryReply) {
-	var (
-		realIndexMatch int // 下一个可能match的位置
-		err            error
-	)
-	if reply.Success {
-		realIndexMatch, err = rf.Log.MToR(rf.leaderState.matchIndex[peerID])
-	} else {
-		// find match index quickly
-		if reply.LastIndexOfTerm > 0 {
-			realIndexMatch, err = rf.Log.findEntryWithTerm(reply.LastIndexOfTerm, args.PrevLogTerm)
-		} else {
-			// try decrease term
-			realIndexMatch, err = rf.Log.findEntryTermLess(args.PrevLogTerm)
-		}
+func (rf *Raft) checkAppendEntryReturned(args *AppendEntryArgs, reply *AppendEntryReply) error {
+	if reply.Term > rf.currentTerm {
+		rf.becomeFollower(reply.Term)
+		return ErrNewTermFound
 	}
-	if err == nil {
-		args.PrevLogIndex = rf.Log.RToM(realIndexMatch)
-		args.PrevLogTerm = rf.Log.slice[realIndexMatch].Term
-	} else if err == LastAppliedNotInLog {
-		args.PrevLogIndex = rf.Log.lastIncluded
-		args.PrevLogTerm = rf.Log.lastIncludeTerm
-	} else { // NotInLog
-		rf.sendSnapshotTo(peerID)
+	if err := rf.checkStopSyncLog(args.Term); err != nil {
+		return err
 	}
-	args.Entries = rf.Log.slice[realIndexMatch+1:]
+	return nil
 }
 
 func (rf *Raft) checkStopSyncLog(syncTerm int) error {
@@ -179,35 +164,33 @@ func (rf *Raft) sendHeartbeatTo(peerID int) {
 	defer rf.Unlock()
 
 	now := nowUnixNano()
-	rf.leaderState.lastHeartbeat[peerID] = now
+	rf.Log.leaderState.lastHeartbeat[peerID] = now
 	args := &AppendEntryArgs{
 		Term:         rf.currentTerm,
 		LeaderID:     rf.me,
 		LeaderCommit: rf.Log.commitIndex,
 		CreateTs:     now,
 	}
-	realIndexMatch, err := rf.Log.MToR(rf.leaderState.matchIndex[peerID])
+	realIndexMatch, err := rf.Log.MToR(rf.Log.leaderState.matchIndex[peerID])
 	if err == nil {
 		args.PrevLogIndex = rf.Log.RToM(realIndexMatch)
-		args.PrevLogTerm = rf.Log.slice[realIndexMatch].Term
-	} else if err == LastAppliedNotInLog {
+		args.PrevLogTerm = rf.Log.entries[realIndexMatch].Term
+	} else if err == IncludedNotInLog {
 		args.PrevLogIndex = rf.Log.lastIncluded
 		args.PrevLogTerm = rf.Log.lastIncludeTerm
 	} else { // NotInLog
-		rf.sendSnapshotTo(peerID)
-		args.PrevLogTerm, args.PrevLogIndex = rf.Log.lastEntryTermIndex()
+		//rf.sendSnapshotTo(peerID)
+		//args.PrevLogTerm, args.PrevLogIndex = rf.Log.lastEntryTermIndex()
 	}
 	reply := &AppendEntryReply{}
-	logrus.Debugf("%s sendHeartbeatTo to peer%d, args=%s", rf.desc(), peerID, args)
 	ok := rf.AppendEntryRPC(peerID, args, reply)
-	if !ok { // retry
-		logrus.Debugf("%s sendHeartbeatTo to peer%d RPC failed, CreateTs=%d", rf.desc(), peerID, args.CreateTs)
+	if !ok {
 		return
 	}
 	if reply.Term > rf.currentTerm {
-		logrus.Debugf("%s sendHeartbeatTo [Term%d|Peer%d], newer term found", rf.desc(), reply.Term, peerID)
+		logrus.Debugf("%s sendHeartbeatTo [Term%d|Peer%d], newer term found", rf.Brief(), reply.Term, peerID)
 		rf.becomeFollower(reply.Term)
 		return
 	}
-	logrus.Debugf("%s sendHeartbeatTo to peer%d returned, CreateTs=%d, reply=%+v", rf.desc(), peerID, args.CreateTs, reply)
+	logrus.Debugf("%s sendHeartbeatTo to peer%d returned, CreateTs=%d, reply=%+v", rf.Brief(), peerID, args.CreateTs, reply)
 }

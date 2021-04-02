@@ -9,7 +9,9 @@ package raft
 //
 
 import (
+	"bytes"
 	"github.com/sirupsen/logrus"
+	"mit6.824/labgob"
 	"mit6.824/labrpc"
 	"runtime/debug"
 )
@@ -123,11 +125,12 @@ func (cfg *config) crash1(i int) {
 		cfg.rafts[i] = nil
 	}
 
-	if cfg.saved[i] != nil {
-		raftlog := cfg.saved[i].ReadRaftState()
-		cfg.saved[i] = &Persister{}
-		cfg.saved[i].SaveRaftState(raftlog)
-	}
+	// wtf? delete this....
+	//if cfg.saved[i] != nil {
+	//	raftlog := cfg.saved[i].ReadRaftState()
+	//	cfg.saved[i] = &Persister{}
+	//	cfg.saved[i].SaveRaftState(raftlog)
+	//}
 }
 
 //
@@ -171,11 +174,25 @@ func (cfg *config) start1(i int) {
 	// listen to messages from Raft indicating newly committed messages.
 	applyCh := make(chan ApplyMsg)
 	go func() {
+		var (
+			lastInclude int
+			lastApplied int
+		)
 		for m := range applyCh {
 			err_msg := ""
 			if m.CommandValid == false {
-				// ignore other types of ApplyMsg
+				logrus.Debugf("install snapshot, lastInclude=%v, lastApplied=%v, m.CommandIndex=%v", lastInclude, lastApplied, m.CommandIndex)
+				if m.CommandIndex <= lastApplied {
+					panic(fmt.Sprintf("snapshot CommandIndex=%v, lastInclude=%v, lastApplied=%v", m.CommandIndex, lastInclude, lastApplied)) // check TODO delete
+				}
+				cfg.installSnapshot(i, m.Command.([]byte))
+				lastInclude, lastApplied = m.CommandIndex, m.CommandIndex
 			} else {
+				if m.CommandIndex == lastApplied+1 {
+					lastApplied = m.CommandIndex
+				} else {
+					err_msg = fmt.Sprintf("applying CommandIndex=%v, but lastApplied=%v", m.CommandIndex, lastApplied) // check TODO delete
+				}
 				v := m.Command
 				cfg.mu.Lock()
 				for j := 0; j < len(cfg.logs); j++ {
@@ -203,6 +220,11 @@ func (cfg *config) start1(i int) {
 				// keep reading after error so that Raft doesn't block
 				// holding locks...
 			}
+			if lastApplied-lastInclude > SnapshotCond {
+				lastInclude = lastApplied
+				snapshot := cfg.marshalSnapshot(i)
+				cfg.rafts[i].Snapshot(lastApplied, snapshot)
+			}
 		}
 	}()
 
@@ -216,6 +238,25 @@ func (cfg *config) start1(i int) {
 	srv := labrpc.MakeServer()
 	srv.AddService(svc)
 	cfg.net.AddServer(i, srv)
+}
+
+func (cfg *config) marshalSnapshot(peerID int) []byte {
+	cfg.mu.Lock()
+	defer cfg.mu.Unlock()
+	w := new(bytes.Buffer)
+	e := labgob.NewEncoder(w)
+	err := e.Encode(cfg.logs[peerID])
+	checkErr(err)
+	return w.Bytes()
+}
+
+func (cfg *config) installSnapshot(peerID int, snapshot []byte) {
+	cfg.mu.Lock()
+	defer cfg.mu.Unlock()
+	r := bytes.NewBuffer(snapshot)
+	e := labgob.NewDecoder(r)
+	err := e.Decode(&cfg.logs[peerID])
+	checkErr(err)
 }
 
 func (cfg *config) checkTimeout() {

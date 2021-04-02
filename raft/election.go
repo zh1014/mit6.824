@@ -39,7 +39,7 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 	lastLogTerm, lastLogIdx := rf.Log.lastEntryTermIndex()
 	defer func() {
 		logrus.Debugf("%s exec RequestVote, lastLog=[Index%d,Term%d], votedFor %d: args=%+v, reply=%+v",
-			rf.desc(), lastLogIdx, lastLogTerm, rf.votedFor, args, reply)
+			rf.Brief(), lastLogIdx, lastLogTerm, rf.votedFor, args, reply)
 		rf.Unlock()
 	}()
 
@@ -101,17 +101,17 @@ func (rf *Raft) requestVoteFrom(peerID int) {
 		CreateTs:    nowUnixNano(),
 	}
 	args.LastLogTerm, args.LastLogIndex = rf.Log.lastEntryTermIndex()
-	logrus.Debugf("%s requestVoteFrom peer%d, args=%+v", rf.desc(), peerID, args)
+	logrus.Debugf("%s requestVoteFrom peer%d, args=%+v", rf.Brief(), peerID, args)
 	reply := new(RequestVoteReply)
 	ok := rf.RequestVoteRPC(peerID, args, reply)
 	if rf.killed() {
 		return
 	}
 	if !ok {
-		logrus.Debugf("%s requestVoteFrom peer%d RPC failed, CreateTs=%d", rf.desc(), peerID, args.CreateTs)
+		logrus.Debugf("%s requestVoteFrom peer%d RPC failed, CreateTs=%d", rf.Brief(), peerID, args.CreateTs)
 		return
 	}
-	logrus.Debugf("%s requestVoteFrom peer%d returned, CreateTs=%d, reply=%+v", rf.desc(), peerID, args.CreateTs, reply)
+	logrus.Debugf("%s requestVoteFrom peer%d returned, CreateTs=%d, reply=%+v", rf.Brief(), peerID, args.CreateTs, reply)
 	if reply.Term > rf.currentTerm {
 		rf.becomeFollower(reply.Term)
 		return

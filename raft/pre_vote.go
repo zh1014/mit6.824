@@ -15,17 +15,17 @@ func (rf *Raft) requestPreVoteFrom(peerID int) {
 		CreateTs:    nowUnixNano(),
 	}
 	args.LastLogTerm, args.LastLogIndex = rf.Log.lastEntryTermIndex()
-	logrus.Debugf("%s requestPreVoteFrom peer%d, args=%+v", rf.desc(), peerID, args)
+	logrus.Debugf("%s requestPreVoteFrom peer%d, args=%+v", rf.Brief(), peerID, args)
 	reply := new(RequestVoteReply)
 	ok := rf.PreVoteRPC(peerID, args, reply)
 	if rf.killed() {
 		return
 	}
 	if !ok {
-		logrus.Debugf("%s requestPreVoteFrom peer%d RPC failed, CreateTs=%d", rf.desc(), peerID, args.CreateTs)
+		logrus.Debugf("%s requestPreVoteFrom peer%d RPC failed, CreateTs=%d", rf.Brief(), peerID, args.CreateTs)
 		return
 	}
-	logrus.Debugf("%s requestPreVoteFrom peer%d returned, CreateTs=%d, reply=%+v", rf.desc(), peerID, args.CreateTs, reply)
+	logrus.Debugf("%s requestPreVoteFrom peer%d returned, CreateTs=%d, reply=%+v", rf.Brief(), peerID, args.CreateTs, reply)
 	if reply.Term > rf.currentTerm {
 		rf.becomeFollower(reply.Term)
 		return
@@ -61,7 +61,7 @@ func (rf *Raft) PreVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 	lastLogTerm, lastLogIdx := rf.Log.lastEntryTermIndex()
 	defer func() {
 		logrus.Debugf("%s exec PreVote, lastLog=[Index%d,Term%d], args=%+v, reply=%+v",
-			rf.desc(), lastLogIdx, lastLogTerm, args, reply)
+			rf.Brief(), lastLogIdx, lastLogTerm, args, reply)
 		rf.Unlock()
 	}()
 

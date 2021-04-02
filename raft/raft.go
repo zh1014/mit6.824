@@ -20,9 +20,9 @@ package raft
 import (
 	"fmt"
 	"github.com/sirupsen/logrus"
+	"github.com/zh1014/algorithm/queue"
 	"math/rand"
 	"mit6.824/labrpc"
-	"sort"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -85,23 +85,11 @@ type Raft struct {
 	elecTimeout   int64
 	lastHeartbeat int64
 	Log           *Log
-	leaderState   *LeaderState
 	Dirty
 }
 
-type LeaderState struct {
-	nextIndex     []int
-	matchIndex    []int
-	newEntryCond  *sync.Cond
-	lastHeartbeat []int64
-}
-
-func (l *LeaderState) needHeartbeat(peerID int) bool {
-	return nowUnixNano()-l.lastHeartbeat[peerID] > int64(heartbeatIntv)
-}
-
 func (rf *Raft) Unlock() {
-	rf.persistIfDirty()
+	rf.WritePersistIfDirty()
 	rf.Mutex.Unlock()
 }
 
@@ -132,7 +120,7 @@ func (rf *Raft) ticker() {
 				if peerID == rf.me {
 					continue
 				}
-				if !rf.leaderState.needHeartbeat(peerID) {
+				if !rf.Log.leaderState.needHeartbeat(peerID) {
 					continue
 				}
 				go rf.sendHeartbeatTo(peerID)
@@ -154,11 +142,7 @@ func (rf *Raft) voted() bool {
 	return rf.votedFor >= 0
 }
 
-func (rf *Raft) printLog() {
-	//logrus.Debugf("%s printLog, log=%v", rf.desc(), entriesString(rf.log))
-}
-
-func (rf *Raft) desc() string {
+func (rf *Raft) Brief() string {
 	desc := fmt.Sprintf("[Term%d|Peer%d|%v", rf.currentTerm, rf.me, rf.role)
 	if rf.role != leader {
 		timeoutLeft := (rf.elecTimeout - nowUnixNano()) / int64(time.Millisecond)
@@ -191,24 +175,9 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 	if rf.role != leader {
 		return index, term, false
 	}
-	logrus.Debugf("%s Start(%v)", rf.desc(), command)
-	rf.appendEntry(command)
-	term, index = rf.Log.lastEntryTermIndex()
-	rf.leaderState.matchIndex[rf.me] = index
-	rf.leaderState.newEntryCond.Broadcast()
-	if rf.Log.Len() > snapshotTriggerCond {
-		rf.snapshot()
-	}
+	logrus.Debugf("%s Start(%v) ...", rf.Brief(), command)
+	index, term = rf.Log.appendEntry(rf.me, rf.currentTerm, command)
 	return index, term, true
-}
-
-func (rf *Raft) appendEntry(command interface{}) {
-	rf.Log.slice = append(rf.Log.slice, &labrpc.LogEntry{
-		Term: rf.currentTerm,
-		Cmd:  command,
-	})
-	rf.MarkDirty()
-	//rf.printLog()
 }
 
 //
@@ -239,21 +208,21 @@ func (rf *Raft) randElectionTimeout() int64 {
 // outer lock
 func (rf *Raft) becomeFollower(term int) {
 	rf.MarkDirty()
-	from := rf.desc()
+	from := rf.Brief()
 	rf.role = follower
 	rf.currentTerm = term
 	rf.votedFor = -1
 	rf.Log.matchIndex = 0
 	rf.resetTimeout()
-	logrus.Infof("%s -> %s", from, rf.desc())
+	logrus.Infof("%s -> %s", from, rf.Brief())
 }
 
 func (rf *Raft) becomePreCandidate() {
 	rf.MarkDirty()
-	from := rf.desc()
+	from := rf.Brief()
 	rf.role = preCandidate
 	rf.resetTimeout()
-	logrus.Infof("%s -> %s", from, rf.desc())
+	logrus.Infof("%s -> %s", from, rf.Brief())
 	rf.voteGot = make([]bool, len(rf.peers))
 
 	// vote for self
@@ -274,11 +243,11 @@ func (rf *Raft) becomePreCandidate() {
 
 func (rf *Raft) becomeCandidate() {
 	rf.MarkDirty()
-	from := rf.desc()
+	from := rf.Brief()
 	rf.role = candidate
 	rf.currentTerm++
 	rf.resetTimeout()
-	logrus.Infof("%s -> %s", from, rf.desc())
+	logrus.Infof("%s -> %s", from, rf.Brief())
 	rf.voteGot = make([]bool, len(rf.peers))
 
 	// vote for self
@@ -299,59 +268,19 @@ func (rf *Raft) becomeCandidate() {
 
 func (rf *Raft) becomeLeader() {
 	rf.MarkDirty()
-	logrus.Infof("%s -> leader", rf.desc())
+	logrus.Infof("%s -> leader", rf.Brief())
 	rf.role = leader
-	rf.leaderState = &LeaderState{
-		nextIndex:     make([]int, len(rf.peers)),
-		matchIndex:    make([]int, len(rf.peers)),
-		lastHeartbeat: make([]int64, len(rf.peers)),
-		newEntryCond:  sync.NewCond(rf),
-	}
-	for i := range rf.leaderState.nextIndex {
-		rf.leaderState.nextIndex[i] = rf.Log.RToM(rf.Log.Len())
-	}
+	rf.Log.initLeaderState(rf)
+	rf.startLogReplication()
+}
 
+func (rf *Raft) startLogReplication() {
 	for peerID := range rf.peers {
 		if peerID == rf.me {
 			continue
 		}
 		go rf.syncLogEntriesTo(peerID)
 	}
-}
-
-func (rf *Raft) waitNewLogEntry(peerID int) {
-	for rf.synced(peerID) {
-		rf.leaderState.newEntryCond.Wait()
-	}
-}
-
-// outer lock
-func (rf *Raft) checkCommit() {
-	sortedMatch := make([]int, len(rf.leaderState.matchIndex))
-	copy(sortedMatch, rf.leaderState.matchIndex)
-	sort.Ints(sortedMatch)
-
-	// len(sortedMatch) must > 0
-	// matchIndex 中位数作为 提交值
-	// 把 matchIndex 升序排序后，取中位数。若中位数有2个，应该取小的
-	middle := 0
-	if len(sortedMatch)%2 == 0 {
-		middle = (len(sortedMatch) - 1) / 2
-	} else {
-		middle = len(sortedMatch) / 2
-	}
-	medianMatch := sortedMatch[middle]
-	if medianMatch > rf.Log.commitIndex && rf.Log.findEntry(medianMatch).Term == rf.currentTerm {
-		rf.Log.commitIndex = medianMatch
-		rf.Log.MarkDirty()
-		rf.Log.applyCond.Signal()
-		logrus.Infof("%s checkCommit, update commitIndex %d, log=%s", rf.desc(), rf.Log.commitIndex, rf.Log.StringLog())
-	}
-}
-
-func (rf *Raft) synced(pid int) bool {
-	_, idx := rf.Log.lastEntryTermIndex()
-	return idx == rf.leaderState.matchIndex[pid]
 }
 
 // the service or tester wants to create a Raft server. the ports
@@ -365,30 +294,53 @@ func (rf *Raft) synced(pid int) bool {
 // for any long-running work.
 func Make(peers []*labrpc.ClientEnd, me int,
 	persister *Persister, applyCh chan ApplyMsg) *Raft {
+	// init data-structure
 	rf := &Raft{}
 	rf.peers = peers
 	rf.persister = persister
 	rf.me = me
 	rf.rand = rand.New(rand.NewSource(time.Now().UnixNano()))
-	rf.Log = &Log{
-		applyCond: sync.NewCond(rf),
+	rf.resetTimeout()
+	rf.initLog()
+	if persist := persister.ReadRaftState(); len(persist) > 0 {
+		rf.ReadPersist(persist)
 	}
 
-	if rawData := persister.ReadRaftState(); len(rawData) > 0 {
-		rf.readPersist(rawData)
+	rf.initStateMachine(me, persister, applyCh)
+	if rf.role == leader {
+		rf.startLogReplication()
 	}
-	if rf.role == follower {
-		rf.resetTimeout()
-	} else if rf.role == leader {
-		rf.becomeLeader()
-	}
-
-	go rf.applyDamon(applyCh)
 	go rf.ticker()
+	logrus.Infof("%s server start...", rf.Brief())
 	return rf
 }
 
-func (rf *Raft) applyDamon(applyCh chan ApplyMsg) {
+func (rf *Raft) initLog() {
+	rf.Log = &Log{
+		applyCh:    make(chan ApplyMsg),
+		applyCond:  sync.NewCond(rf),
+		raftHandle: rf,
+	}
+	rf.Log.initLeaderState(rf)
+}
+
+func (rf *Raft) initStateMachine(me int, persister *Persister, applyCh chan ApplyMsg) {
+	go ApplyTransfer(rf.me, rf.Log.applyCh, applyCh)
+	if rf.Log.lastIncluded > 0 {
+		if persister.SnapshotSize() == 0 {
+			logrus.Fatalf("peer%d snapshot missing, lastIncluded %d", me, rf.Log.lastIncluded)
+		}
+		rf.Log.applyCh <- ApplyMsg{
+			CommandValid: false,
+			Command:      persister.ReadSnapshot(),
+			CommandIndex: rf.Log.lastIncluded,
+		}
+	}
+	rf.Log.lastApplied = rf.Log.lastIncluded
+	go rf.applyConstantly()
+}
+
+func (rf *Raft) applyConstantly() {
 	rf.Lock()
 	for {
 		for !rf.Log.canApply() {
@@ -400,25 +352,47 @@ func (rf *Raft) applyDamon(applyCh chan ApplyMsg) {
 
 		for rf.Log.canApply() {
 			msg := rf.Log.applyOne()
-			//logrus.Debugf("%s applying msg=%+v", rf.desc(), msg)
 			rf.Unlock()
-			applyCh <- msg
+			rf.Log.applyCh <- msg
 			rf.Lock()
 			if rf.killed() {
 				break
 			}
-			//logrus.Debugf("%s applied msg=%+v", rf.desc(), msg)
+			//logrus.Debugf("%s applied msg=%+v", rf.Brief(), msg)
 		}
 	}
 	rf.Unlock()
 }
 
-func (rf *Raft) snapshot() {
-	ri, _ := rf.Log.MToR(rf.Log.lastApplied)
-	if ri < 0 {
-		logrus.Debugf("%s snapshot failed, len=%d, ri=%d, lastApplied=%v", rf.desc(), rf.Log.Len(), ri, rf.Log.lastApplied)
-		return
+// fixme 重构，抽象ApplyTransfer
+func ApplyTransfer(peerID int, from <-chan ApplyMsg, to chan<- ApplyMsg) {
+	var lastApplied int
+	q := queue.NewLinkedQueue()
+	for msg := range from {
+		if msg.CommandValid {
+			if msg.CommandIndex == lastApplied+1 {
+				to <- msg
+				lastApplied++
+			} else if msg.CommandIndex > lastApplied+1 {
+				q.PushBack(msg)
+				logrus.Debugf("ApplyTransfer.lastApplied=%d peer%d PushBack msg=%+v", lastApplied, peerID, msg)
+			} else {
+				panic("unknown error")
+			}
+		} else {
+			if msg.CommandIndex <= lastApplied {
+				continue
+			}
+			to <- msg
+			lastApplied = msg.CommandIndex
+			for !q.IsEmpty() {
+				front := q.Front().(ApplyMsg)
+				if front.CommandIndex != lastApplied+1 {
+					logrus.Fatalf("ApplyTransfer.lastApplied=%d, peer%d, queueFront=%+v", lastApplied, peerID, front)
+				}
+				to <- front
+				lastApplied++
+			}
+		}
 	}
-	// TODO howZ
-	//rf.persister.SaveStateAndSnapshot()
 }
