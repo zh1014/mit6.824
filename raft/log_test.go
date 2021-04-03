@@ -10,10 +10,10 @@ import (
 
 func Test_adjustNextIndex(t *testing.T) {
 	l := &Log{
-		commitIndex:  485,
-		lastApplied:  485,
-		lastIncluded: 402,
-		lastIncludeTerm:4,
+		commitIndex:     485,
+		lastApplied:     485,
+		lastIncluded:    402,
+		lastIncludeTerm: 4,
 		leaderState: &LeaderState{
 			nextIndex: make([]int, 5),
 		},
@@ -30,9 +30,9 @@ func parseStringEntries(str string) []*labrpc.LogEntry {
 	var entries []*labrpc.LogEntry
 	strSli := strings.Split(str, ", ")
 	for _, subStr := range strSli {
-		i0 := strings.IndexByte(subStr, '=')+1
+		i0 := strings.IndexByte(subStr, '=') + 1
 		i1 := strings.IndexByte(subStr, ',')
-		i2 := strings.LastIndexByte(subStr, '=')+1
+		i2 := strings.LastIndexByte(subStr, '=') + 1
 		i3 := strings.IndexByte(subStr, '}')
 		term, err := strconv.Atoi(subStr[i0:i1])
 		checkErr(err)

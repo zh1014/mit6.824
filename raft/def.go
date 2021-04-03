@@ -16,7 +16,5 @@ const (
 )
 
 var (
-	ErrNeedSnapshot = errors.New("need snapshot")
-	ErrNewTermFound = errors.New("new term found")
-	ErrEmptySnapshot = errors.New("empty snapshot")
+	ErrNewTermFound  = errors.New("new term found")
 )
