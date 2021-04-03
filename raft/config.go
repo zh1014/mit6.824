@@ -181,17 +181,13 @@ func (cfg *config) start1(i int) {
 		for m := range applyCh {
 			err_msg := ""
 			if m.CommandValid == false {
-				logrus.Debugf("install snapshot, lastInclude=%v, lastApplied=%v, m.CommandIndex=%v", lastInclude, lastApplied, m.CommandIndex)
-				if m.CommandIndex <= lastApplied {
-					panic(fmt.Sprintf("snapshot CommandIndex=%v, lastInclude=%v, lastApplied=%v", m.CommandIndex, lastInclude, lastApplied)) // check TODO delete
-				}
 				cfg.installSnapshot(i, m.Command.([]byte))
 				lastInclude, lastApplied = m.CommandIndex, m.CommandIndex
 			} else {
 				if m.CommandIndex == lastApplied+1 {
 					lastApplied = m.CommandIndex
 				} else {
-					err_msg = fmt.Sprintf("applying CommandIndex=%v, but lastApplied=%v", m.CommandIndex, lastApplied) // check TODO delete
+					err_msg = fmt.Sprintf("applying CommandIndex=%v, but lastApplied=%v", m.CommandIndex, lastApplied)
 				}
 				v := m.Command
 				cfg.mu.Lock()
