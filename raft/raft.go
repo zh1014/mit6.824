@@ -75,7 +75,6 @@ type Raft struct {
 	persister  *Persister          // Object to hold this peer's persisted state
 	dead       int32               // set by Kill()
 	rand       *rand.Rand
-	statusCond *sync.Cond
 
 	sync.Mutex    // protect follow fields
 	currentTerm   int
