@@ -12,6 +12,7 @@ import (
 
 type RaftHandle interface {
 	Brief() string
+	MarkDirty()
 	PersistStateAndSnapshot(snapshot []byte)
 	sync.Locker
 }
@@ -61,7 +62,6 @@ type Log struct {
 	applyCh         chan ApplyMsg
 	leaderState     *LeaderState
 	raftHandle      RaftHandle
-	Dirty
 }
 
 func (log *Log) initLeaderState(rf *Raft) {
@@ -91,7 +91,7 @@ func (log *Log) appendEntries(start int, entries []*labrpc.LogEntry) {
 			break
 		}
 	}
-	log.MarkDirty()
+	log.raftHandle.MarkDirty()
 	//rf.printLog()
 }
 
@@ -106,7 +106,7 @@ func (log *Log) updateCommitIdx(leaderCommit int) {
 		logrus.Debugf("update commitIndex %v, log=%s", commit, log.Brief())
 		log.commitIndex = commit
 		log.applyCond.Signal()
-		log.MarkDirty()
+		log.raftHandle.MarkDirty()
 	}
 }
 
@@ -358,7 +358,7 @@ func (log *Log) checkCommit(currentTerm int) {
 	medianMatch := sortedMatch[middle]
 	if medianMatch > log.commitIndex && log.findEntry(medianMatch).Term == currentTerm {
 		log.commitIndex = medianMatch
-		log.MarkDirty()
+		log.raftHandle.MarkDirty()
 		log.applyCond.Signal()
 		logrus.Infof("%s checkCommit, update commitIndex %d, log=%s", log.raftHandle.Brief(), log.commitIndex, log.Brief())
 	}
@@ -372,7 +372,7 @@ func (log *Log) appendEntry(me, currentTerm int, command interface{}) (index, te
 	term, index = log.lastEntryTermIndex()
 	log.leaderState.matchIndex[me] = index
 	log.leaderState.newEntryCond.Broadcast()
-	log.MarkDirty()
+	log.raftHandle.MarkDirty()
 	return
 }
 
@@ -395,7 +395,7 @@ func (log *Log) Snapshot(lastIncluded int) {
 	log.lastIncludeTerm = log.entries[ri].Term
 	log.lastIncluded = lastIncluded
 	log.trimLeft(ri, true)
-	log.MarkDirty()
+	log.raftHandle.MarkDirty()
 }
 
 func (log *Log) InstallSnapshot(snapshot []byte, included, includeTerm int) {

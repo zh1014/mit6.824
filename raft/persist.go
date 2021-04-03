@@ -38,18 +38,16 @@ func (rf *Raft) PersistState() {
 	state := rf.marshal()
 	rf.persister.SaveRaftState(state)
 	rf.WipeDirty()
-	rf.Log.WipeDirty()
 }
 
 func (rf *Raft) PersistStateAndSnapshot(snapshot []byte) {
 	state := rf.marshal()
 	rf.persister.SaveStateAndSnapshot(state, snapshot)
 	rf.WipeDirty()
-	rf.Log.WipeDirty()
 }
 
 func (rf *Raft) PersistStateIfDirty() {
-	if rf.IsDirty() || rf.Log.IsDirty() {
+	if rf.IsDirty() {
 		rf.PersistState()
 	}
 }
