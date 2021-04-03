@@ -364,7 +364,6 @@ func (rf *Raft) applyConstantly() {
 	rf.Unlock()
 }
 
-// fixme 重构，抽象ApplyTransfer
 func ApplyTransfer(peerID int, from <-chan ApplyMsg, to chan<- ApplyMsg) {
 	var lastApplied int
 	q := queue.NewLinkedQueue()
