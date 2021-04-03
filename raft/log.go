@@ -12,6 +12,7 @@ import (
 
 type RaftHandle interface {
 	Brief() string
+	PersistStateAndSnapshot(snapshot []byte)
 	sync.Locker
 }
 
@@ -398,9 +399,6 @@ func (log *Log) Snapshot(lastIncluded int) {
 }
 
 func (log *Log) InstallSnapshot(snapshot []byte, included, includeTerm int) {
-	if included <= log.matchIndex {
-		return
-	}
 	from := log.Brief()
 	ri := log.Len() - 1
 	if _, end := log.lastEntryTermIndex(); included < end {
@@ -412,8 +410,8 @@ func (log *Log) InstallSnapshot(snapshot []byte, included, includeTerm int) {
 	log.lastApplied = included
 	log.lastIncluded = included
 	log.lastIncludeTerm = includeTerm
+	log.raftHandle.PersistStateAndSnapshot(snapshot)
 	logrus.Debugf("%s InstallSnapshot from %s -> %s, snapshot size %d", log.raftHandle.Brief(), from, log.Brief(), len(snapshot))
-
 	log.raftHandle.Unlock()
 	log.applyCh <- ApplyMsg{
 		CommandValid: false,

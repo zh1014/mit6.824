@@ -23,7 +23,7 @@ func (rf *Raft) ReadPersist(data []byte) {
 // see paper's Figure 2 for a description of what should be persistent.
 //
 
-func (rf *Raft) Marshal() []byte {
+func (rf *Raft) marshal() []byte {
 	buffer := new(bytes.Buffer)
 	encoder := labgob.NewEncoder(buffer)
 	checkErr(encoder.Encode(rf.currentTerm))
@@ -34,16 +34,23 @@ func (rf *Raft) Marshal() []byte {
 	return buffer.Bytes()
 }
 
-func (rf *Raft) WritePersist() {
-	state := rf.Marshal()
+func (rf *Raft) PersistState() {
+	state := rf.marshal()
 	rf.persister.SaveRaftState(state)
 	rf.WipeDirty()
-	rf.Log.WipeDirty() // TODO fixme
+	rf.Log.WipeDirty()
 }
 
-func (rf *Raft) WritePersistIfDirty() {
+func (rf *Raft) PersistStateAndSnapshot(snapshot []byte) {
+	state := rf.marshal()
+	rf.persister.SaveStateAndSnapshot(state, snapshot)
+	rf.WipeDirty()
+	rf.Log.WipeDirty()
+}
+
+func (rf *Raft) PersistStateIfDirty() {
 	if rf.IsDirty() || rf.Log.IsDirty() {
-		rf.WritePersist()
+		rf.PersistState()
 	}
 }
 

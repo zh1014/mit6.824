@@ -32,6 +32,9 @@ func (rf *Raft) InstallSnapshot(args *InstallSnapshotArgs, reply *InstallSnapsho
 	if (args.Term == rf.currentTerm && rf.role != follower) || args.Term > rf.currentTerm {
 		rf.becomeFollower(args.Term)
 	}
+	if args.Included <= rf.Log.matchIndex {
+		return
+	}
 	rf.Log.InstallSnapshot(args.Snapshot, args.Included, args.IncludedTerm)
 }
 
@@ -67,6 +70,7 @@ func (rf *Raft) sendSnapshotTo(peerID int) error {
 	}
 	return err
 }
+
 func (rf *Raft) InstallSnapshotRPC(peerID int, args *InstallSnapshotArgs, reply *InstallSnapshotReply) bool {
 	logrus.Debugf("%s InstallSnapshot to peer %d, log=%s", rf.Brief(), peerID, rf.Log.Brief())
 	rf.Unlock()
@@ -82,9 +86,7 @@ func (rf *Raft) Snapshot(lastIncluded int, snapshot []byte) {
 	defer rf.Unlock()
 	from := rf.Log.Brief()
 	rf.Log.Snapshot(lastIncluded)
-	state := rf.Marshal()
-	rf.persister.SaveStateAndSnapshot(state, snapshot)
-	rf.WipeDirty()
+	rf.PersistStateAndSnapshot(snapshot)
 	logrus.Debugf("%s snapshot done %s -> %s, snapshotSize %d", rf.Brief(), from, rf.Log.Brief(), rf.persister.SnapshotSize())
 }
 

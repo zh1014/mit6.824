@@ -89,7 +89,7 @@ type Raft struct {
 }
 
 func (rf *Raft) Unlock() {
-	rf.WritePersistIfDirty()
+	rf.PersistStateIfDirty()
 	rf.Mutex.Unlock()
 }
 

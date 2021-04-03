@@ -22,12 +22,12 @@ import "sync"
 // (much more than the paper's range of timeouts).
 const RaftElectionTimeout = 1000 * time.Millisecond
 
-//func TestLoop(t *testing.T) {
-//	const loop = 10
-//	for i := 0; i < loop; i++ {
-//		TestReliableChurn2C(t)
-//	}
-//}
+func TestLoop(t *testing.T) {
+	const loop = 20
+	for i := 0; i < loop; i++ {
+		TestReliableChurn2C(t)
+	}
+}
 
 func TestInitialElection2A(t *testing.T) {
 	logConfig()
