@@ -19,9 +19,9 @@ func DPrintf(format string, a ...interface{}) (n int, err error) {
 }
 
 type Op struct {
-	// Your definitions here.
-	// Field names must start with capital letters,
-	// otherwise RPC will break.
+	typ string
+	Key string
+	Val string
 }
 
 type KVServer struct {
@@ -37,7 +37,15 @@ type KVServer struct {
 }
 
 func (kv *KVServer) Get(args *GetArgs, reply *GetReply) {
-	// Your code here.
+	index, term, isLeader := kv.rf.Start(Op{typ: OpTypeGet, Key: args.Key})
+	if !isLeader {
+		reply.Err = ErrWrongLeader
+		reply.CurrentLeader = kv.rf.GetCurLeader()
+		return
+	}
+	msg := <- kv.applyCh
+	op := msg.Command.(Op)
+	// TODO
 }
 
 func (kv *KVServer) PutAppend(args *PutAppendArgs, reply *PutAppendReply) {

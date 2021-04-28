@@ -1,17 +1,36 @@
 package kvraft
 
-import "../labrpc"
-import "crypto/rand"
+import (
+	"github.com/sirupsen/logrus"
+	"math/rand"
+	"mit6.824/labrpc"
+)
+import crand "crypto/rand"
 import "math/big"
 
 type Clerk struct {
-	servers []*labrpc.ClientEnd
-	// You will have to modify this struct.
+	servers   []*labrpc.ClientEnd
+	curLeader int
+}
+
+func (ck *Clerk) chooseAnotherServer() {
+	if len(ck.servers) == 1 {
+		return
+	}
+	var included []int
+	for i := range ck.servers {
+		if i == ck.curLeader {
+			continue
+		}
+		included = append(included, i)
+	}
+	idx := rand.Intn(len(included))
+	ck.curLeader = included[idx]
 }
 
 func nrand() int64 {
 	max := big.NewInt(int64(1) << 62)
-	bigx, _ := rand.Int(rand.Reader, max)
+	bigx, _ := crand.Int(crand.Reader, max)
 	x := bigx.Int64()
 	return x
 }
@@ -36,9 +55,26 @@ func MakeClerk(servers []*labrpc.ClientEnd) *Clerk {
 // arguments. and reply must be passed as a pointer.
 //
 func (ck *Clerk) Get(key string) string {
+	args := &GetArgs{Key: key}
+	reply := &GetReply{}
+	for {
+		ok := ck.servers[ck.curLeader].Call("KVServer.Get", args, reply)
+		if !ok {
+			ck.chooseAnotherServer()
+			continue
+		}
 
-	// You will have to modify this function.
-	return ""
+		switch reply.Err {
+		case OK:
+			return reply.Value
+		case ErrNoKey:
+			return ""
+		case ErrWrongLeader:
+			ck.curLeader = reply.CurrentLeader
+		default:
+			logrus.Debugf("Get reply.Err:%s", reply.Err)
+		}
+	}
 }
 
 //
@@ -52,12 +88,33 @@ func (ck *Clerk) Get(key string) string {
 // arguments. and reply must be passed as a pointer.
 //
 func (ck *Clerk) PutAppend(key string, value string, op string) {
-	// You will have to modify this function.
+	args := &PutAppendArgs{
+		Key:   key,
+		Value: value,
+		Op:    op,
+	}
+	reply := &PutAppendReply{}
+	for {
+		ok := ck.servers[ck.curLeader].Call("KVServer.PutAppend", args, reply)
+		if !ok {
+			ck.chooseAnotherServer()
+			continue
+		}
+
+		switch reply.Err {
+		case OK:
+			return
+		case ErrWrongLeader:
+			ck.curLeader = reply.CurrentLeader
+		default:
+			logrus.Debugf("PutAppend reply.Err:%s", reply.Err)
+		}
+	}
 }
 
 func (ck *Clerk) Put(key string, value string) {
-	ck.PutAppend(key, value, "Put")
+	ck.PutAppend(key, value, OpTypePut)
 }
 func (ck *Clerk) Append(key string, value string) {
-	ck.PutAppend(key, value, "Append")
+	ck.PutAppend(key, value, OpTypeAppend)
 }
