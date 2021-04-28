@@ -83,6 +83,7 @@ type Raft struct {
 	voteGot       []bool // for preCandidate, candidate
 	elecTimeout   int64
 	lastHeartbeat int64
+	curLeader     int
 	Log           *Log
 	Dirty
 }
@@ -135,6 +136,12 @@ func (rf *Raft) GetState() (int, bool) {
 	rf.Lock()
 	defer rf.Unlock()
 	return rf.currentTerm, rf.role == leader
+}
+
+func (rf *Raft) GetCurLeader() int {
+	rf.Lock()
+	defer rf.Unlock()
+	return rf.curLeader
 }
 
 func (rf *Raft) voted() bool {
@@ -211,7 +218,7 @@ func (rf *Raft) becomeFollower(term int) {
 	rf.role = follower
 	rf.currentTerm = term
 	rf.votedFor = -1
-	rf.Log.matchIndex = 0
+	rf.Log.matchWithLeader = 0
 	rf.resetTimeout()
 	logrus.Infof("%s -> %s", from, rf.Brief())
 }
@@ -269,6 +276,7 @@ func (rf *Raft) becomeLeader() {
 	rf.MarkDirty()
 	logrus.Infof("%s -> leader", rf.Brief())
 	rf.role = leader
+	rf.curLeader = rf.me
 	rf.Log.initLeaderState(rf)
 	rf.startLogReplication()
 }

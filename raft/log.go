@@ -24,7 +24,7 @@ const (
 
 type LeaderState struct {
 	nextIndex     []int
-	matchIndex    []int
+	matchIndex    []int // match with followers
 	lastHeartbeat []int64
 	newEntryCond  *sync.Cond
 }
@@ -51,9 +51,11 @@ func (l *LeaderState) decode(decoder *labgob.LabDecoder) {
 	checkErr(decoder.Decode(&l.matchIndex))
 }
 
+// matchWithLeader > commitIndex at most time
+// commitIndex > lastApplied > lastIncluded at any time
 type Log struct {
 	entries         []*labrpc.LogEntry
-	matchIndex      int
+	matchWithLeader int
 	commitIndex     int
 	lastApplied     int
 	lastIncluded    int
@@ -76,7 +78,7 @@ func (log *Log) initLeaderState(rf *Raft) {
 	}
 }
 
-func (log *Log) appendEntries(start int, entries []*labrpc.LogEntry) {
+func (log *Log) mergeEntries(start int, entries []*labrpc.LogEntry) {
 	if len(entries) == 0 {
 		return
 	}
@@ -92,7 +94,6 @@ func (log *Log) appendEntries(start int, entries []*labrpc.LogEntry) {
 		}
 	}
 	log.raftHandle.MarkDirty()
-	//rf.printLog()
 }
 
 func (log *Log) Len() int {
@@ -100,8 +101,8 @@ func (log *Log) Len() int {
 }
 
 // 只能提交leader已经提交，且肯定与leader匹配的部分LogEntry
-func (log *Log) updateCommitIdx(leaderCommit int) {
-	commit := min(leaderCommit, log.matchIndex)
+func (log *Log) updateCommitIdxIfNeed(leaderCommit int) {
+	commit := min(leaderCommit, log.matchWithLeader)
 	if commit > log.commitIndex {
 		logrus.Debugf("update commitIndex %v, log=%s", commit, log.Brief())
 		log.commitIndex = commit
@@ -110,10 +111,10 @@ func (log *Log) updateCommitIdx(leaderCommit int) {
 	}
 }
 
-func (log *Log) followerUpdateMatchIndex(args *AppendEntryArgs) {
+func (log *Log) updateMatchWithLeaderIfNeed(args *AppendEntryArgs) {
 	match := args.PrevLogIndex + len(args.Entries)
-	if match > log.matchIndex {
-		log.matchIndex = match
+	if match > log.matchWithLeader {
+		log.matchWithLeader = match
 	}
 }
 
@@ -405,7 +406,7 @@ func (log *Log) InstallSnapshot(snapshot []byte, included, includeTerm int) {
 		ri, _ = log.MToR(included)
 	}
 	log.trimLeft(ri, false)
-	log.matchIndex = included
+	log.matchWithLeader = included
 	log.commitIndex = included
 	log.lastApplied = included
 	log.lastIncluded = included
@@ -435,7 +436,7 @@ func (log *Log) trimLeft(trimIdx int, allocate bool) {
 
 func (log *Log) encode(encoder *labgob.LabEncoder) {
 	checkErr(encoder.Encode(log.entries))
-	checkErr(encoder.Encode(log.matchIndex))
+	checkErr(encoder.Encode(log.matchWithLeader))
 	checkErr(encoder.Encode(log.commitIndex))
 	checkErr(encoder.Encode(log.lastIncluded))
 	checkErr(encoder.Encode(log.lastIncludeTerm))
@@ -444,7 +445,7 @@ func (log *Log) encode(encoder *labgob.LabEncoder) {
 
 func (log *Log) decode(decoder *labgob.LabDecoder) {
 	checkErr(decoder.Decode(&log.entries))
-	checkErr(decoder.Decode(&log.matchIndex))
+	checkErr(decoder.Decode(&log.matchWithLeader))
 	checkErr(decoder.Decode(&log.commitIndex))
 	checkErr(decoder.Decode(&log.lastIncluded))
 	checkErr(decoder.Decode(&log.lastIncludeTerm))

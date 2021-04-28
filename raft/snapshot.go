@@ -32,7 +32,7 @@ func (rf *Raft) InstallSnapshot(args *InstallSnapshotArgs, reply *InstallSnapsho
 	if (args.Term == rf.currentTerm && rf.role != follower) || args.Term > rf.currentTerm {
 		rf.becomeFollower(args.Term)
 	}
-	if args.Included <= rf.Log.matchIndex {
+	if args.Included <= rf.Log.matchWithLeader {
 		return
 	}
 	rf.Log.InstallSnapshot(args.Snapshot, args.Included, args.IncludedTerm)

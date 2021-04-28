@@ -49,23 +49,29 @@ func (rf *Raft) AppendEntry(args *AppendEntryArgs, reply *AppendEntryReply) {
 		reply.Success = false
 		return
 	}
-
-	defer rf.Log.updateCommitIdx(args.LeaderCommit) // 收到leader（term不小于自己）的消息，就可能更新 commitIndex
-	rf.lastHeartbeat = nowUnixNano()
-	rf.resetTimeout()
-	if (args.Term == rf.currentTerm && rf.role != follower) || args.Term > rf.currentTerm {
-		rf.becomeFollower(args.Term)
-	}
-
+	// 收到 合法leader（term不小于自己）的消息
+	rf.onReceiveHeartbeat(args.LeaderID, args.Term)
 	prev, err := rf.Log.findEntryWithTerm(args.PrevLogIndex, args.PrevLogTerm)
 	if err == NotInLog {
-		reply.Success = false
+		// PrevLog匹配失败，通过 LastIndexOfTerm 减少重试次数
 		reply.LastIndexOfTerm = rf.Log.lastIndexOfTerm(args.PrevLogTerm)
-		return
+		reply.Success = false
+	} else {
+		// PrevLog匹配成功
+		rf.Log.mergeEntries(prev+1, args.Entries)
+		rf.Log.updateMatchWithLeaderIfNeed(args)
+		reply.Success = true
 	}
-	rf.Log.followerUpdateMatchIndex(args) // 只要PrevLog匹配成功，就可能更新matchIndex
-	rf.Log.appendEntries(prev+1, args.Entries)
-	reply.Success = true
+	rf.Log.updateCommitIdxIfNeed(args.LeaderCommit)
+}
+
+func (rf *Raft) onReceiveHeartbeat(leaderID, leaderTerm int) {
+	rf.lastHeartbeat = nowUnixNano()
+	rf.curLeader = leaderID
+	rf.resetTimeout()
+	if (leaderTerm == rf.currentTerm && rf.role != follower) || leaderTerm > rf.currentTerm {
+		rf.becomeFollower(leaderTerm)
+	}
 }
 
 func (rf *Raft) AppendEntryRPC(peerID int, args *AppendEntryArgs, reply *AppendEntryReply) bool {
