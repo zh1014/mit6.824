@@ -1,6 +1,12 @@
 package kvraft
 
-import "mit6.824/porcupine"
+import (
+	"bytes"
+	"github.com/sirupsen/logrus"
+	"mit6.824/labgob"
+	"mit6.824/porcupine"
+	"mit6.824/util"
+)
 import "mit6.824/models"
 import "testing"
 import "strconv"
@@ -60,12 +66,12 @@ func spawn_clients_and_wait(t *testing.T, cfg *config, ncli int, fn func(me int,
 		ca[cli] = make(chan bool)
 		go run_client(t, cfg, cli, ca[cli], fn)
 	}
-	// log.Printf("spawn_clients_and_wait: waiting for clients")
+	logrus.Infof("spawn_clients_and_wait: waiting for clients")
 	for cli := 0; cli < ncli; cli++ {
 		ok := <-ca[cli]
-		// log.Printf("spawn_clients_and_wait: client %d is done\n", cli)
+		logrus.Infof("spawn_clients_and_wait: client %d is done\n", cli)
 		if ok == false {
-			t.Fatalf("failure")
+			logrus.Fatalf("failure")
 		}
 	}
 }
@@ -206,12 +212,12 @@ func GenericTest(t *testing.T, part string, nclients int, unreliable bool, crash
 			for atomic.LoadInt32(&done_clients) == 0 {
 				if (rand.Int() % 1000) < 500 {
 					nv := "x " + strconv.Itoa(cli) + " " + strconv.Itoa(j) + " y"
-					// log.Printf("%d: client new append %v\n", cli, nv)
+					logrus.Infof("%d: client new append %v\n", cli, nv)
 					Append(cfg, myck, key, nv)
 					last = NextValue(last, nv)
 					j++
 				} else {
-					// log.Printf("%d: client new get %v\n", cli, key)
+					logrus.Infof("%d: client new get %v\n", cli, key)
 					v := Get(cfg, myck, key)
 					if v != last {
 						log.Fatalf("get wrong value, key %v, wanted:\n%v\n, got\n%v\n", key, last, v)
@@ -363,7 +369,7 @@ func GenericTestLinearizability(t *testing.T, part string, nclients int, nserver
 					out = models.KvOutput{Value: v}
 				}
 				end := int64(time.Since(begin))
-				op := porcupine.Operation{Input: inp, Call: start, Output: out, Return: end, ClientId: cli}
+				op := porcupine.Operation{Input: inp, Call: start, Output: out, Return: end, ClientId: myck.id}
 				opMu.Lock()
 				operations = append(operations, op)
 				opMu.Unlock()
@@ -446,6 +452,7 @@ func GenericTestLinearizability(t *testing.T, part string, nclients int, nserver
 }
 
 func TestBasic3A(t *testing.T) {
+	util.LogConfig()
 	// Test: one client (3A) ...
 	GenericTest(t, "3A", 1, false, false, false, -1)
 }
@@ -461,6 +468,7 @@ func TestUnreliable3A(t *testing.T) {
 }
 
 func TestUnreliableOneKey3A(t *testing.T) {
+	util.LogConfig()
 	const nservers = 3
 	cfg := make_config(t, nservers, true, -1)
 	defer cfg.cleanup()
@@ -492,10 +500,40 @@ func TestUnreliableOneKey3A(t *testing.T) {
 	cfg.end()
 }
 
+func TestSnapshot(t *testing.T) {
+	state := map[string]string{
+		"k":    "x0 0yx1 0y",
+		"howz": "",
+	}
+	cs := map[int]int{
+		0: 1997,
+		1: 1014,
+		2: 0,
+	}
+
+	buffer := new(bytes.Buffer)
+	encoder := labgob.NewEncoder(buffer)
+	util.CheckErr(encoder.Encode(state))
+	util.CheckErr(encoder.Encode(cs))
+
+	binary := buffer.Bytes()
+
+	state1 := make(map[string]string)
+	cs1 := make(map[int]int)
+	reader := bytes.NewBuffer(binary)
+	decoder := labgob.NewDecoder(reader)
+	util.CheckErr(decoder.Decode(&state1))
+	util.CheckErr(decoder.Decode(&cs1))
+
+	fmt.Println(state1)
+	fmt.Println(cs1)
+}
+
 // Submit a request in the minority partition and check that the requests
 // doesn't go through until the partition heals.  The leader in the original
 // network ends up in the minority partition.
 func TestOnePartition3A(t *testing.T) {
+	util.LogConfig()
 	const nservers = 5
 	cfg := make_config(t, nservers, false, -1)
 	defer cfg.cleanup()
@@ -606,6 +644,7 @@ func TestPersistPartitionUnreliable3A(t *testing.T) {
 }
 
 func TestPersistPartitionUnreliableLinearizable3A(t *testing.T) {
+	util.LogConfig()
 	// Test: unreliable net, restarts, partitions, linearizability checks (3A) ...
 	GenericTestLinearizability(t, "3A", 15, 7, true, true, true, -1)
 }

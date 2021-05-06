@@ -1,31 +1,35 @@
 package kvraft
 
 import (
+	"fmt"
 	"github.com/sirupsen/logrus"
-	"math/rand"
 	"mit6.824/labrpc"
 )
 import crand "crypto/rand"
 import "math/big"
 
 type Clerk struct {
+	id        int
+	serialNo  int
 	servers   []*labrpc.ClientEnd
-	curLeader int
+	curServer int
 }
 
 func (ck *Clerk) chooseAnotherServer() {
-	if len(ck.servers) == 1 {
-		return
-	}
-	var included []int
-	for i := range ck.servers {
-		if i == ck.curLeader {
-			continue
-		}
-		included = append(included, i)
-	}
-	idx := rand.Intn(len(included))
-	ck.curLeader = included[idx]
+	ck.curServer++
+	ck.curServer %= len(ck.servers)
+	//if len(ck.servers) == 1 {
+	//	return
+	//}
+	//var included []int
+	//for i := range ck.servers {
+	//	if i == ck.curServer {
+	//		continue
+	//	}
+	//	included = append(included, i)
+	//}
+	//idx := rand.Intn(len(included))
+	//ck.curServer = included[idx]
 }
 
 func nrand() int64 {
@@ -35,10 +39,12 @@ func nrand() int64 {
 	return x
 }
 
-func MakeClerk(servers []*labrpc.ClientEnd) *Clerk {
-	ck := new(Clerk)
-	ck.servers = servers
-	// You'll have to add code here.
+func MakeClerk(clientID int, servers []*labrpc.ClientEnd) *Clerk {
+	ck := &Clerk{
+		id:       clientID,
+		serialNo: 1,
+		servers:  servers,
+	}
 	return ck
 }
 
@@ -54,27 +60,47 @@ func MakeClerk(servers []*labrpc.ClientEnd) *Clerk {
 // must match the declared types of the RPC handler function's
 // arguments. and reply must be passed as a pointer.
 //
-func (ck *Clerk) Get(key string) string {
-	args := &GetArgs{Key: key}
-	reply := &GetReply{}
+func (ck *Clerk) Get(key string) (val string) {
+	args := &GetArgs{
+		ClientID: ck.id,
+		SerialNo: ck.serialNo,
+		Key:      key,
+	}
+	logrus.Infof("%s Get(%+v)", ck, args)
+	defer func() {
+		ck.serialNo++
+		logrus.Infof("%s Get(%+v) finished, value=(%s)", ck, args, val)
+	}()
 	for {
-		ok := ck.servers[ck.curLeader].Call("KVServer.Get", args, reply)
+		reply := &GetReply{}
+		logrus.Tracef("%s.Get(%s)", ck, key)
+		ok := ck.servers[ck.curServer].Call("KVServer.Get", args, reply)
 		if !ok {
+			logrus.Tracef("%s.Get(%s) not ok", ck, key)
 			ck.chooseAnotherServer()
 			continue
 		}
 
 		switch reply.Err {
 		case OK:
-			return reply.Value
+			val = reply.Value
+			return
 		case ErrNoKey:
-			return ""
+			val = ""
+			return
 		case ErrWrongLeader:
-			ck.curLeader = reply.CurrentLeader
+			logrus.Tracef("%s.Get(%s) reply ErrWrongLeader", ck, key)
+			ck.chooseAnotherServer()
+		case ErrRaftTimeout:
+			ck.chooseAnotherServer()
 		default:
-			logrus.Debugf("Get reply.Err:%s", reply.Err)
+			logrus.Warnf("Get reply.Err:%s", reply.Err)
 		}
 	}
+}
+
+func (ck *Clerk) String() string {
+	return fmt.Sprintf("[Client%d]", ck.id)
 }
 
 //
@@ -89,14 +115,23 @@ func (ck *Clerk) Get(key string) string {
 //
 func (ck *Clerk) PutAppend(key string, value string, op string) {
 	args := &PutAppendArgs{
-		Key:   key,
-		Value: value,
-		Op:    op,
+		ClientID: ck.id,
+		SerialNo: ck.serialNo,
+		Key:      key,
+		Value:    value,
+		Op:       op,
 	}
-	reply := &PutAppendReply{}
+	logrus.Infof("%s PutAppend(%+v)", ck, args)
+	defer func() {
+		ck.serialNo++
+		logrus.Infof("%s PutAppend(%+v) finished", ck, args)
+	}()
 	for {
-		ok := ck.servers[ck.curLeader].Call("KVServer.PutAppend", args, reply)
+		reply := &PutAppendReply{}
+		logrus.Tracef("%s.PutAppend(%+v)", ck, args)
+		ok := ck.servers[ck.curServer].Call("KVServer.PutAppend", args, reply)
 		if !ok {
+			logrus.Tracef("%s.PutAppend(%+v) not ok", ck, args)
 			ck.chooseAnotherServer()
 			continue
 		}
@@ -105,9 +140,12 @@ func (ck *Clerk) PutAppend(key string, value string, op string) {
 		case OK:
 			return
 		case ErrWrongLeader:
-			ck.curLeader = reply.CurrentLeader
+			logrus.Tracef("%s.PutAppend(%+v) ErrWrongLeader", ck, args)
+			ck.chooseAnotherServer()
+		case ErrRaftTimeout:
+			ck.chooseAnotherServer()
 		default:
-			logrus.Debugf("PutAppend reply.Err:%s", reply.Err)
+			logrus.Warnf("PutAppend reply.Err:%s", reply.Err)
 		}
 	}
 }

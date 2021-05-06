@@ -1,39 +1,42 @@
 package kvraft
 
+import "time"
+
 const (
 	OK             = "OK"
 	ErrNoKey       = "ErrNoKey"
 	ErrWrongLeader = "ErrWrongLeader"
+	ErrRaftTimeout = "ErrRaftTimeout"
 
 	OpTypeGet    = "Get"
 	OpTypePut    = "Put"
 	OpTypeAppend = "Append"
+
+	RaftOpTimeout = time.Second
 )
 
 type Err string
 
 // Put or Append
 type PutAppendArgs struct {
-	Key   string
-	Value string
-	Op    string // "Put" or "Append"
-	// You'll have to add definitions here.
-	// Field names must start with capital letters,
-	// otherwise RPC will break.
+	ClientID int
+	SerialNo int
+	Key      string
+	Value    string
+	Op       string // "Put" or "Append"
 }
 
 type PutAppendReply struct {
-	Err           Err
-	CurrentLeader int
+	Err Err
 }
 
 type GetArgs struct {
-	Key string
-	// You'll have to add definitions here.
+	ClientID int
+	SerialNo int
+	Key      string
 }
 
 type GetReply struct {
-	Err           Err
-	Value         string
-	CurrentLeader int
+	Err   Err
+	Value string
 }

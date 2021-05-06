@@ -1,6 +1,9 @@
 package kvraft
 
-import "mit6.824/labrpc"
+import (
+	"github.com/sirupsen/logrus"
+	"mit6.824/labrpc"
+)
 import "testing"
 import "os"
 
@@ -174,7 +177,7 @@ func (cfg *config) ConnectAll() {
 func (cfg *config) partition(p1 []int, p2 []int) {
 	cfg.mu.Lock()
 	defer cfg.mu.Unlock()
-	// log.Printf("partition servers into: %v %v\n", p1, p2)
+	logrus.Infof("partition servers into: %v %v\n", p1, p2)
 	for i := 0; i < len(p1); i++ {
 		cfg.disconnectUnlocked(p1[i], p2)
 		cfg.connectUnlocked(p1[i], p1)
@@ -201,7 +204,7 @@ func (cfg *config) makeClient(to []int) *Clerk {
 		cfg.net.Connect(endnames[j], j)
 	}
 
-	ck := MakeClerk(random_handles(ends))
+	ck := MakeClerk(cfg.nextClientId, random_handles(ends))
 	cfg.clerks[ck] = endnames
 	cfg.nextClientId++
 	cfg.ConnectClientUnlocked(ck, to)
@@ -398,6 +401,7 @@ func (cfg *config) rpcTotal() int {
 // e.g. cfg.begin("Test (2B): RPC counts aren't too high")
 func (cfg *config) begin(description string) {
 	fmt.Printf("%s ...\n", description)
+	logrus.Infof("%s ...\n", description)
 	cfg.t0 = time.Now()
 	cfg.rpcs0 = cfg.rpcTotal()
 	atomic.StoreInt32(&cfg.ops, 0)
