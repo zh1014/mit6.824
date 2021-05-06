@@ -48,23 +48,23 @@ type ApplyMsg struct {
 	CommandIndex int
 }
 
-type raftRole int
+type Role int
 
 const (
-	follower raftRole = iota
+	follower Role = iota
 	preCandidate
 	candidate
 	leader
 )
 
-var roleString = map[raftRole]string{
+var roleString = map[Role]string{
 	follower:     "follower",
 	preCandidate: "preCandidate",
 	candidate:    "candidate",
 	leader:       "leader",
 }
 
-func (r raftRole) String() string {
+func (r Role) String() string {
 	return roleString[r]
 }
 
@@ -78,7 +78,7 @@ type Raft struct {
 
 	sync.Mutex    // protect follow fields
 	currentTerm   int
-	role          raftRole
+	role          Role
 	votedFor      int
 	voteGot       []bool // for preCandidate, candidate
 	elecTimeout   int64
@@ -181,7 +181,7 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 	if rf.role != leader {
 		return index, term, false
 	}
-	logrus.Debugf("%s Start(%v) ...", rf.Brief(), command)
+	logrus.Tracef("%s Start(%+v) ...", rf.Brief(), command)
 	index, term = rf.Log.appendEntry(rf.me, rf.currentTerm, command)
 	return index, term, true
 }
@@ -302,11 +302,13 @@ func (rf *Raft) startLogReplication() {
 func Make(peers []*labrpc.ClientEnd, me int,
 	persister *Persister, applyCh chan ApplyMsg) *Raft {
 	// init data-structure
-	rf := &Raft{}
-	rf.peers = peers
-	rf.persister = persister
-	rf.me = me
-	rf.rand = rand.New(rand.NewSource(time.Now().UnixNano()))
+	rf := &Raft{
+		peers:     peers,
+		me:        me,
+		persister: persister,
+		rand:      rand.New(rand.NewSource(time.Now().UnixNano())),
+		curLeader: -1,
+	}
 	rf.resetTimeout()
 	rf.initLog()
 	if persist := persister.ReadRaftState(); len(persist) > 0 {

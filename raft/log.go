@@ -104,7 +104,7 @@ func (log *Log) Len() int {
 func (log *Log) updateCommitIdxIfNeed(leaderCommit int) {
 	commit := min(leaderCommit, log.matchWithLeader)
 	if commit > log.commitIndex {
-		logrus.Debugf("update commitIndex %v, log=%s", commit, log.Brief())
+		logrus.Tracef("update commitIndex %v, log=%s", commit, log.Brief())
 		log.commitIndex = commit
 		log.applyCond.Signal()
 		log.raftHandle.MarkDirty()
@@ -361,7 +361,7 @@ func (log *Log) checkCommit(currentTerm int) {
 		log.commitIndex = medianMatch
 		log.raftHandle.MarkDirty()
 		log.applyCond.Signal()
-		logrus.Infof("%s checkCommit, update commitIndex %d, log=%s", log.raftHandle.Brief(), log.commitIndex, log.Brief())
+		logrus.Tracef("%s checkCommit, update commitIndex %d, log=%s", log.raftHandle.Brief(), log.commitIndex, log.Brief())
 	}
 }
 

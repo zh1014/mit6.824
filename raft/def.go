@@ -16,5 +16,5 @@ const (
 )
 
 var (
-	ErrNewTermFound  = errors.New("new term found")
+	ErrNewTermFound = errors.New("new term found")
 )

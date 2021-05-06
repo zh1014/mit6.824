@@ -42,7 +42,7 @@ type AppendEntryReply struct {
 func (rf *Raft) AppendEntry(args *AppendEntryArgs, reply *AppendEntryReply) {
 	rf.Lock()
 	defer rf.Unlock()
-	logrus.Debugf("%s receive AppendEntry, args=%s, log=%s", rf.Brief(), args, rf.Log.Brief())
+	logrus.Tracef("%s receive AppendEntry, args=%s, log=%s", rf.Brief(), args, rf.Log.Brief())
 
 	reply.Term = rf.currentTerm
 	if args.Term < rf.currentTerm {
@@ -67,10 +67,10 @@ func (rf *Raft) AppendEntry(args *AppendEntryArgs, reply *AppendEntryReply) {
 
 func (rf *Raft) onReceiveHeartbeat(leaderID, leaderTerm int) {
 	rf.lastHeartbeat = nowUnixNano()
-	rf.curLeader = leaderID
 	rf.resetTimeout()
 	if (leaderTerm == rf.currentTerm && rf.role != follower) || leaderTerm > rf.currentTerm {
 		rf.becomeFollower(leaderTerm)
+		rf.curLeader = leaderID
 	}
 }
 
@@ -80,11 +80,11 @@ func (rf *Raft) AppendEntryRPC(peerID int, args *AppendEntryArgs, reply *AppendE
 	if len(args.Entries) == 0 {
 		action = "SendHeartbeat to"
 	}
-	logrus.Debugf("%s %s peer%d, args=%s", subject, action, peerID, args)
+	logrus.Tracef("%s %s peer%d, args=%s", subject, action, peerID, args)
 	rf.Unlock()
 	start := time.Now()
 	ok := rf.peers[peerID].Call("Raft.AppendEntry", args, reply)
-	logrus.Debugf("%s %s peer%d [CreateTs:%d,cost:%v,RPC-OK:%v], reply=%+v", subject, action, peerID, args.CreateTs, time.Now().Sub(start), ok, reply)
+	logrus.Tracef("%s %s peer%d [CreateTs:%d,cost:%v,RPC-OK:%v], reply=%+v", subject, action, peerID, args.CreateTs, time.Now().Sub(start), ok, reply)
 	rf.Lock()
 	return ok
 }
@@ -92,7 +92,7 @@ func (rf *Raft) AppendEntryRPC(peerID int, args *AppendEntryArgs, reply *AppendE
 func (rf *Raft) syncLogEntriesTo(peerID int) {
 	rf.Lock()
 	defer rf.Unlock()
-	logrus.Debugf("%s syncLogEntriesTo %d start....", rf.Brief(), peerID)
+	logrus.Tracef("%s syncLogEntriesTo %d start....", rf.Brief(), peerID)
 	var err error
 	args := &AppendEntryArgs{
 		Term:     rf.currentTerm,
@@ -194,9 +194,9 @@ func (rf *Raft) sendHeartbeatTo(peerID int) {
 		return
 	}
 	if reply.Term > rf.currentTerm {
-		logrus.Debugf("%s sendHeartbeatTo [Term%d|Peer%d], newer term found", rf.Brief(), reply.Term, peerID)
+		logrus.Tracef("%s sendHeartbeatTo [Term%d|Peer%d], newer term found", rf.Brief(), reply.Term, peerID)
 		rf.becomeFollower(reply.Term)
 		return
 	}
-	logrus.Debugf("%s sendHeartbeatTo to peer%d returned, CreateTs=%d, reply=%+v", rf.Brief(), peerID, args.CreateTs, reply)
+	logrus.Tracef("%s sendHeartbeatTo to peer%d returned, CreateTs=%d, reply=%+v", rf.Brief(), peerID, args.CreateTs, reply)
 }
