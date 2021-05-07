@@ -1,9 +1,7 @@
 package kvraft
 
 import (
-	"bytes"
 	"github.com/sirupsen/logrus"
-	"mit6.824/labgob"
 	"mit6.824/porcupine"
 	"mit6.824/util"
 )
@@ -500,34 +498,34 @@ func TestUnreliableOneKey3A(t *testing.T) {
 	cfg.end()
 }
 
-func TestSnapshot(t *testing.T) {
-	state := map[string]string{
-		"k":    "x0 0yx1 0y",
-		"howz": "",
-	}
-	cs := map[int]int{
-		0: 1997,
-		1: 1014,
-		2: 0,
-	}
-
-	buffer := new(bytes.Buffer)
-	encoder := labgob.NewEncoder(buffer)
-	util.CheckErr(encoder.Encode(state))
-	util.CheckErr(encoder.Encode(cs))
-
-	binary := buffer.Bytes()
-
-	state1 := make(map[string]string)
-	cs1 := make(map[int]int)
-	reader := bytes.NewBuffer(binary)
-	decoder := labgob.NewDecoder(reader)
-	util.CheckErr(decoder.Decode(&state1))
-	util.CheckErr(decoder.Decode(&cs1))
-
-	fmt.Println(state1)
-	fmt.Println(cs1)
-}
+//func TestSnapshot(t *testing.T) {
+//	state := map[string]string{
+//		"k":    "x0 0yx1 0y",
+//		"howz": "",
+//	}
+//	cs := map[int]int{
+//		0: 1997,
+//		1: 1014,
+//		2: 0,
+//	}
+//
+//	buffer := new(bytes.Buffer)
+//	encoder := labgob.NewEncoder(buffer)
+//	util.CheckErr(encoder.Encode(state))
+//	util.CheckErr(encoder.Encode(cs))
+//
+//	binary := buffer.Bytes()
+//
+//	state1 := make(map[string]string)
+//	cs1 := make(map[int]int)
+//	reader := bytes.NewBuffer(binary)
+//	decoder := labgob.NewDecoder(reader)
+//	util.CheckErr(decoder.Decode(&state1))
+//	util.CheckErr(decoder.Decode(&cs1))
+//
+//	fmt.Println(state1)
+//	fmt.Println(cs1)
+//}
 
 // Submit a request in the minority partition and check that the requests
 // doesn't go through until the partition heals.  The leader in the original
@@ -656,6 +654,7 @@ func TestPersistPartitionUnreliableLinearizable3A(t *testing.T) {
 // even if minority doesn't respond.
 //
 func TestSnapshotRPC3B(t *testing.T) {
+	util.LogConfig()
 	const nservers = 3
 	maxraftstate := 1000
 	cfg := make_config(t, nservers, false, maxraftstate)
@@ -713,6 +712,7 @@ func TestSnapshotRPC3B(t *testing.T) {
 // are the snapshots not too huge? 500 bytes is a generous bound for the
 // operations we're doing here.
 func TestSnapshotSize3B(t *testing.T) {
+	util.LogConfig()
 	const nservers = 3
 	maxraftstate := 1000
 	maxsnapshotstate := 500
@@ -746,31 +746,37 @@ func TestSnapshotSize3B(t *testing.T) {
 }
 
 func TestSnapshotRecover3B(t *testing.T) {
+	util.LogConfig()
 	// Test: restarts, snapshots, one client (3B) ...
 	GenericTest(t, "3B", 1, false, true, false, 1000)
 }
 
 func TestSnapshotRecoverManyClients3B(t *testing.T) {
+	util.LogConfig()
 	// Test: restarts, snapshots, many clients (3B) ...
 	GenericTest(t, "3B", 20, false, true, false, 1000)
 }
 
 func TestSnapshotUnreliable3B(t *testing.T) {
+	util.LogConfig()
 	// Test: unreliable net, snapshots, many clients (3B) ...
 	GenericTest(t, "3B", 5, true, false, false, 1000)
 }
 
 func TestSnapshotUnreliableRecover3B(t *testing.T) {
+	util.LogConfig()
 	// Test: unreliable net, restarts, snapshots, many clients (3B) ...
 	GenericTest(t, "3B", 5, true, true, false, 1000)
 }
 
 func TestSnapshotUnreliableRecoverConcurrentPartition3B(t *testing.T) {
+	util.LogConfig()
 	// Test: unreliable net, restarts, partitions, snapshots, many clients (3B) ...
 	GenericTest(t, "3B", 5, true, true, true, 1000)
 }
 
 func TestSnapshotUnreliableRecoverConcurrentPartitionLinearizable3B(t *testing.T) {
+	util.LogConfig()
 	// Test: unreliable net, restarts, partitions, snapshots, linearizability checks (3B) ...
 	GenericTestLinearizability(t, "3B", 15, 7, true, true, true, 1000)
 }

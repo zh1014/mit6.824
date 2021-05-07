@@ -13,6 +13,7 @@ const (
 	OpTypeAppend = "Append"
 
 	RaftOpTimeout = time.Second
+	LogEntrySize  = 50
 )
 
 type Err string

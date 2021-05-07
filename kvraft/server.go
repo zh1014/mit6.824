@@ -85,10 +85,14 @@ func (kv *KVServer) PutAppend(args *PutAppendArgs, reply *PutAppendReply) {
 
 func (kv *KVServer) ApplyToStateMachine() {
 	for msg := range kv.applyCh {
+		if kv.killed() {
+			logrus.Infof("%s exit...", kv)
+			break
+		}
 		if msg.CommandValid {
 			// common operation
 			kv.lastApplied = msg.CommandIndex
-			kv.applyOp(msg.Command.(Op))
+			kv.handleOp(msg.Command.(Op))
 			if kv.needSnapshot() {
 				kv.snapshot()
 			}
@@ -101,37 +105,30 @@ func (kv *KVServer) ApplyToStateMachine() {
 	}
 }
 
-func (kv *KVServer) applyOp(op Op) {
-	if op.SerialNo < kv.clientSerial[op.ClientID] {
-		logrus.Errorf("client %d should use increasing serial number ", op.ClientID)
-		return
-	}
-	switch op.Typ {
-	case OpTypeGet:
-	case OpTypePut:
-		if op.SerialNo == kv.clientSerial[op.ClientID] {
-			// client retrying, only write once
-			logrus.Debugf("%s skip op", kv)
-			break
-		}
-		kv.state[op.Key] = op.Val
-	case OpTypeAppend:
-		if op.SerialNo == kv.clientSerial[op.ClientID] {
-			// client retrying, only write once
-			logrus.Debugf("%s skip op", kv)
-			break
-		}
-		kv.state[op.Key] += op.Val
-	default:
-		panic("unknown op type")
-	}
-	kv.clientSerial[op.ClientID] = op.SerialNo
-	logrus.Debugf("%s Op=%+v, NowVal=%s", kv, op, kv.state[op.Key])
+func (kv *KVServer) handleOp(op Op) {
+	kv.idempotentApply(op)
 	if _, isLeader := kv.rf.GetState(); !isLeader {
 		// drop output (In fact, there is no blocked RPC )
 		return
 	}
 	go awakenRPC(op.Ret, kv.state[op.Key])
+}
+
+func (kv *KVServer) idempotentApply(op Op) {
+	if op.SerialNo <= kv.clientSerial[op.ClientID] {
+		return
+	}
+	switch op.Typ {
+	case OpTypeGet:
+	case OpTypePut:
+		kv.state[op.Key] = op.Val
+	case OpTypeAppend:
+		kv.state[op.Key] += op.Val
+	default:
+		logrus.Errorf("unknown op type %+v", op)
+	}
+	kv.clientSerial[op.ClientID] = op.SerialNo
+	logrus.Tracef("%s Op=%+v, NowVal=%s", kv, op, kv.state[op.Key])
 }
 
 // awaken blocked RPC, output to client
@@ -147,7 +144,7 @@ func (kv *KVServer) needSnapshot() bool {
 	if kv.maxraftstate <= 0 {
 		return false
 	}
-	return kv.lastApplied-kv.snapshotInclude > kv.maxraftstate
+	return (kv.lastApplied-kv.snapshotInclude)*LogEntrySize > kv.maxraftstate
 }
 
 func (kv *KVServer) snapshot() {
@@ -194,7 +191,6 @@ func (kv *KVServer) Kill() {
 	// Your code here, if desired.
 }
 
-// TODO: check killed
 func (kv *KVServer) killed() bool {
 	z := atomic.LoadInt32(&kv.dead)
 	return z == 1
