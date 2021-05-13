@@ -43,7 +43,7 @@ import (
 // ApplyMsg, but set CommandValid to false for these other uses.
 //
 type ApplyMsg struct {
-	CommandValid bool
+	Type         ApplyMsgType
 	Command      interface{}
 	CommandIndex int
 }
@@ -70,11 +70,12 @@ func (r Role) String() string {
 
 // A Go object implementing a single Raft peer.
 type Raft struct {
-	peers     []*labrpc.ClientEnd // RPC end points of all peers.
-	me        int                 // this peer's index into peers[]
-	persister *Persister          // Object to hold this peer's persisted state
-	dead      int32               // set by Kill()
-	rand      *rand.Rand
+	peers       []*labrpc.ClientEnd // RPC end points of all peers.
+	me          int                 // this peer's index into peers[]
+	persister   *Persister          // Object to hold this peer's persisted state
+	maxRaftSize int
+	dead        int32 // set by Kill()
+	rand        *rand.Rand
 
 	sync.Mutex    // protect follow fields
 	currentTerm   int
@@ -300,25 +301,28 @@ func (rf *Raft) startLogReplication() {
 // Make() must return quickly, so it should start goroutines
 // for any long-running work.
 func Make(peers []*labrpc.ClientEnd, me int,
-	persister *Persister, applyCh chan ApplyMsg) *Raft {
+	persister *Persister, applyCh chan ApplyMsg, maxSize int) *Raft {
 	// init data-structure
 	rf := &Raft{
-		peers:     peers,
-		me:        me,
-		persister: persister,
-		rand:      rand.New(rand.NewSource(time.Now().UnixNano())),
-		curLeader: -1,
+		peers:       peers,
+		me:          me,
+		persister:   persister,
+		maxRaftSize: maxSize,
+		rand:        rand.New(rand.NewSource(time.Now().UnixNano())),
+		curLeader:   -1,
 	}
-	rf.resetTimeout()
 	rf.initLog()
 	if persist := persister.ReadRaftState(); len(persist) > 0 {
 		rf.ReadPersist(persist)
 	}
 
-	rf.initStateMachine(me, persister, applyCh)
+	go ApplyTransfer(rf.me, rf.Log.applyCh, applyCh) // logEntry -> ApplyTransfer -> StateMachine
+	rf.initStateMachine(me, persister)
+
 	if rf.role == leader {
 		rf.startLogReplication()
 	}
+	rf.resetTimeout()
 	go rf.ticker()
 	logrus.Infof("%s server start...", rf.Brief())
 	return rf
@@ -333,17 +337,17 @@ func (rf *Raft) initLog() {
 	rf.Log.initLeaderState(rf)
 }
 
-func (rf *Raft) initStateMachine(me int, persister *Persister, applyCh chan ApplyMsg) {
-	go ApplyTransfer(rf.me, rf.Log.applyCh, applyCh)
+func (rf *Raft) initStateMachine(me int, persister *Persister) {
 	if rf.Log.lastIncluded > 0 {
 		if persister.SnapshotSize() == 0 {
 			logrus.Fatalf("peer%d snapshot missing, lastIncluded %d", me, rf.Log.lastIncluded)
 		}
-		rf.Log.applyCh <- ApplyMsg{
-			CommandValid: false,
+		msg := ApplyMsg{
+			Type:         MsgInstallSnapshot,
 			Command:      persister.ReadSnapshot(),
 			CommandIndex: rf.Log.lastIncluded,
 		}
+		rf.Log.applyCh <- msg
 	}
 	rf.Log.lastApplied = rf.Log.lastIncluded
 	go rf.applyConstantly()
@@ -361,45 +365,70 @@ func (rf *Raft) applyConstantly() {
 
 		for rf.Log.canApply() {
 			msg := rf.Log.applyOne()
+		SendMsg:
 			rf.Unlock()
 			rf.Log.applyCh <- msg
 			rf.Lock()
 			if rf.killed() {
 				break
 			}
-			//logrus.Debugf("%s applied msg=%+v", rf.Brief(), msg)
+			if rf.shouldMakeSnapshot() {
+				rf.Log.snapshotMaking = rf.Log.lastApplied
+				msg = ApplyMsg{
+					Type:         MsgMakeSnapshot,
+					CommandIndex: rf.Log.lastApplied,
+				}
+				goto SendMsg
+			}
 		}
 	}
 	rf.Unlock()
+}
+
+func (rf *Raft) shouldMakeSnapshot() bool {
+	return rf.maxRaftSize > 0 && rf.Log.EstimateSize() > rf.maxRaftSize
 }
 
 func ApplyTransfer(peerID int, from <-chan ApplyMsg, to chan<- ApplyMsg) {
 	var lastApplied int
 	q := queue.NewLinkedQueue()
 	for msg := range from {
-		if msg.CommandValid {
-			if msg.CommandIndex == lastApplied+1 {
-				to <- msg
-				lastApplied++
-			} else if msg.CommandIndex > lastApplied+1 {
-				q.PushBack(msg)
-				logrus.Debugf("ApplyTransfer.lastApplied=%d peer%d PushBack msg=%+v", lastApplied, peerID, msg)
-			} else {
-				panic("unknown error")
-			}
-		} else {
+		switch msg.Type {
+		case MsgLogEntry:
 			if msg.CommandIndex <= lastApplied {
-				continue
+				panic("unknown err")
+			} else if msg.CommandIndex == lastApplied+1 {
+				to <- msg
+				lastApplied = msg.CommandIndex
+			} else if msg.CommandIndex > lastApplied+1 {
+				checkErr(q.PushBack(msg))
+				logrus.Debugf("ApplyTransfer.lastApplied=%d peer%d PushBack msg=%+v", lastApplied, peerID, msg)
+			}
+		case MsgInstallSnapshot:
+			if msg.CommandIndex <= lastApplied {
+				panic("unknown err")
 			}
 			to <- msg
 			lastApplied = msg.CommandIndex
 			for !q.IsEmpty() {
 				front := q.Front().(ApplyMsg)
-				if front.CommandIndex != lastApplied+1 {
-					logrus.Fatalf("ApplyTransfer.lastApplied=%d, peer%d, queueFront=%+v", lastApplied, peerID, front)
+				if front.Type == MsgLogEntry && front.CommandIndex != lastApplied+1 {
+					panic("wrong order")
+				}
+				if front.Type == MsgMakeSnapshot && front.CommandIndex != lastApplied {
+					panic("wrong order")
 				}
 				to <- front
-				lastApplied++
+				lastApplied = front.CommandIndex
+			}
+		case MsgMakeSnapshot:
+			if q.IsEmpty() {
+				if msg.CommandIndex != lastApplied {
+					panic("wrong order")
+				}
+				to <- msg
+			} else {
+				checkErr(q.PushBack(msg))
 			}
 		}
 	}

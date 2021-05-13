@@ -10,9 +10,17 @@ const (
 
 	HeartbeatIntv = ElectionTimeout / 10
 
-	SnapshotCond = 200
+	LogEntrySize  = 50 // byte
 
 	LogOutput = "/Users/zhanghao1/code/6.824/raft/raft.txt"
+)
+
+type ApplyMsgType int
+
+const (
+	MsgLogEntry ApplyMsgType = iota
+	MsgInstallSnapshot
+	MsgMakeSnapshot
 )
 
 var (

@@ -59,7 +59,7 @@ func (rf *Raft) AppendEntry(args *AppendEntryArgs, reply *AppendEntryReply) {
 	} else {
 		// PrevLog匹配成功
 		rf.Log.mergeEntries(prev+1, args.Entries)
-		rf.Log.updateMatchWithLeaderIfNeed(args)
+		rf.Log.updateMatchWithLeaderIfNeed(args.PrevLogIndex + len(args.Entries))
 		reply.Success = true
 	}
 	rf.Log.updateCommitIdxIfNeed(args.LeaderCommit)

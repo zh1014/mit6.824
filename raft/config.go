@@ -175,15 +175,14 @@ func (cfg *config) start1(i int) {
 	applyCh := make(chan ApplyMsg)
 	go func() {
 		var (
-			lastInclude int
 			lastApplied int
 		)
 		for m := range applyCh {
 			err_msg := ""
-			if m.CommandValid == false {
+			if m.Type == MsgInstallSnapshot {
 				cfg.installSnapshot(i, m.Command.([]byte))
-				lastInclude, lastApplied = m.CommandIndex, m.CommandIndex
-			} else {
+				lastApplied = m.CommandIndex
+			} else if m.Type == MsgLogEntry {
 				if m.CommandIndex == lastApplied+1 {
 					lastApplied = m.CommandIndex
 				} else {
@@ -208,6 +207,9 @@ func (cfg *config) start1(i int) {
 				if m.CommandIndex > 1 && prevok == false {
 					err_msg = fmt.Sprintf("server %v apply out of order %v", i, m.CommandIndex)
 				}
+			} else if m.Type == MsgMakeSnapshot {
+				snapshot := cfg.marshalSnapshot(i)
+				cfg.rafts[i].Snapshot(lastApplied, snapshot)
 			}
 
 			if err_msg != "" {
@@ -216,15 +218,10 @@ func (cfg *config) start1(i int) {
 				// keep reading after error so that Raft doesn't block
 				// holding locks...
 			}
-			if lastApplied-lastInclude > SnapshotCond {
-				lastInclude = lastApplied
-				snapshot := cfg.marshalSnapshot(i)
-				cfg.rafts[i].Snapshot(lastApplied, snapshot)
-			}
 		}
 	}()
 
-	rf := Make(ends, i, cfg.saved[i], applyCh)
+	rf := Make(ends, i, cfg.saved[i], applyCh, 1000)
 
 	cfg.mu.Lock()
 	cfg.rafts[i] = rf

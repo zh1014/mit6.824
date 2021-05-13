@@ -58,6 +58,7 @@ type Log struct {
 	matchWithLeader int
 	commitIndex     int
 	lastApplied     int
+	snapshotMaking  int // equal to lastIncluded at most time. bigger than lastIncluded only after send
 	lastIncluded    int
 	lastIncludeTerm int
 	applyCond       *sync.Cond
@@ -111,8 +112,7 @@ func (log *Log) updateCommitIdxIfNeed(leaderCommit int) {
 	}
 }
 
-func (log *Log) updateMatchWithLeaderIfNeed(args *AppendEntryArgs) {
-	match := args.PrevLogIndex + len(args.Entries)
+func (log *Log) updateMatchWithLeaderIfNeed(match int) {
 	if match > log.matchWithLeader {
 		log.matchWithLeader = match
 	}
@@ -223,12 +223,16 @@ func (log *Log) applyOne() ApplyMsg {
 		logrus.Fatalf("%v: log=%v", err, log.String())
 	}
 	msg := ApplyMsg{
-		CommandValid: true,
+		Type: 		  MsgLogEntry,
 		Command:      log.entries[applying].Cmd,
 		CommandIndex: log.lastApplied,
 	}
 	//logrus.Debugf("%s applying msg=%+v", log.raftHandle.Brief(), msg)
 	return msg
+}
+
+func (log *Log) EstimateSize() int {
+	return (log.lastApplied - log.snapshotMaking) * LogEntrySize
 }
 
 func (log *Log) canApply() bool {
@@ -275,46 +279,18 @@ func (log *Log) findEntryTermLess(term int) (int, error) {
 	return 0, NotInLog
 }
 
-func (log *Log) prepareNextAppend(peerID int, args *AppendEntryArgs, reply *AppendEntryReply) (ok bool) {
-	var (
-		realIndexMatch int // 下一个可能match的位置
-		err            error
-	)
-	if reply.Success {
-		realIndexMatch, err = log.MToR(log.leaderState.matchIndex[peerID])
-	} else {
-		// find match index quickly
-		if reply.LastIndexOfTerm > 0 {
-			realIndexMatch, err = log.findEntryWithTerm(reply.LastIndexOfTerm, args.PrevLogTerm)
-		} else {
-			// try decrease term
-			//realIndexMatch, err = log.findEntryTermLess(args.PrevLogTerm)
-		}
-	}
-	if err == NotInLog {
-		return false
-	}
-	if err == nil {
-		args.PrevLogIndex = log.RToM(realIndexMatch)
-		args.PrevLogTerm = log.entries[realIndexMatch].Term
-	} else if err == IncludedNotInLog {
-		args.PrevLogIndex = log.lastIncluded
-		args.PrevLogTerm = log.lastIncludeTerm
-	}
-	args.Entries = log.entries[realIndexMatch+1:]
-	return true
-}
-
 func (log *Log) prepareNextAppendArgs(peerID int, args *AppendEntryArgs) (ok bool) {
 	prevRI, err := log.MToR(log.leaderState.nextIndex[peerID] - 1)
 	if err == nil {
 		args.PrevLogIndex = log.RToM(prevRI)
 		args.PrevLogTerm = log.entries[prevRI].Term
-		args.Entries = log.entries[prevRI+1:]
+		args.Entries = make([]*labrpc.LogEntry, len(log.entries[prevRI+1:]))
+		copy(args.Entries, log.entries[prevRI+1:])
 	} else if err == IncludedNotInLog {
 		args.PrevLogIndex = log.lastIncluded
 		args.PrevLogTerm = log.lastIncludeTerm
-		args.Entries = log.entries
+		args.Entries = make([]*labrpc.LogEntry, len(log.entries))
+		copy(args.Entries, log.entries)
 	} else {
 		return false
 	}
@@ -393,6 +369,9 @@ func (log *Log) Snapshot(lastIncluded int) {
 	if err != nil {
 		panic(fmt.Sprintf("snapshot unknown error: %v", err))
 	}
+	if log.snapshotMaking < lastIncluded {
+		log.snapshotMaking = lastIncluded
+	}
 	log.lastIncludeTerm = log.entries[ri].Term
 	log.lastIncluded = lastIncluded
 	log.trimLeft(ri, true)
@@ -409,19 +388,21 @@ func (log *Log) InstallSnapshot(snapshot []byte, included, includeTerm int) {
 	log.matchWithLeader = included
 	log.commitIndex = included
 	log.lastApplied = included
+	log.snapshotMaking = included
 	log.lastIncluded = included
 	log.lastIncludeTerm = includeTerm
 	log.raftHandle.PersistStateAndSnapshot(snapshot)
 	logrus.Debugf("%s InstallSnapshot from %s -> %s, snapshot size %d", log.raftHandle.Brief(), from, log.Brief(), len(snapshot))
 	log.raftHandle.Unlock()
 	log.applyCh <- ApplyMsg{
-		CommandValid: false,
+		Type:		  MsgInstallSnapshot,
 		Command:      snapshot,
 		CommandIndex: included,
 	}
 	log.raftHandle.Lock()
 }
 
+// drop entries [0,trimIdx] (including trimIdx)
 func (log *Log) trimLeft(trimIdx int, allocate bool) {
 	if allocate {
 		newSli := make([]*labrpc.LogEntry, len(log.entries[trimIdx+1:]))
@@ -438,6 +419,7 @@ func (log *Log) encode(encoder *labgob.LabEncoder) {
 	checkErr(encoder.Encode(log.entries))
 	checkErr(encoder.Encode(log.matchWithLeader))
 	checkErr(encoder.Encode(log.commitIndex))
+	checkErr(encoder.Encode(log.snapshotMaking))
 	checkErr(encoder.Encode(log.lastIncluded))
 	checkErr(encoder.Encode(log.lastIncludeTerm))
 	log.leaderState.encode(encoder)
@@ -447,6 +429,7 @@ func (log *Log) decode(decoder *labgob.LabDecoder) {
 	checkErr(decoder.Decode(&log.entries))
 	checkErr(decoder.Decode(&log.matchWithLeader))
 	checkErr(decoder.Decode(&log.commitIndex))
+	checkErr(decoder.Decode(&log.snapshotMaking))
 	checkErr(decoder.Decode(&log.lastIncluded))
 	checkErr(decoder.Decode(&log.lastIncludeTerm))
 	log.leaderState.decode(decoder)
