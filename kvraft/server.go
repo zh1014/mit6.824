@@ -83,29 +83,43 @@ func (kv *KVServer) PutAppend(args *PutAppendArgs, reply *PutAppendReply) {
 	}
 }
 
-func (kv *KVServer) ApplyToStateMachine() {
+func (kv *KVServer) MonitorMsgFromRaft() {
 	for msg := range kv.applyCh {
 		if kv.killed() {
 			logrus.Infof("%s exit...", kv)
 			break
 		}
-		if msg.CommandValid {
-			// common operation
-			kv.lastApplied = msg.CommandIndex
-			kv.handleOp(msg.Command.(Op))
-			if kv.needSnapshot() {
-				kv.snapshot()
-			}
-		} else {
-			// install snapshot
-			kv.lastApplied = msg.CommandIndex
-			kv.snapshotInclude = msg.CommandIndex
-			kv.installSnapshot(msg.Command.([]byte))
-		}
+		kv.handleMsg(msg)
 	}
 }
 
-func (kv *KVServer) handleOp(op Op) {
+func (kv *KVServer) handleMsg(msg raft.ApplyMsg) {
+	switch msg.Type {
+	case raft.MsgLogEntry:
+		if kv.lastApplied+1 != msg.CommandIndex {
+			logrus.Fatalf("apply in wrong order kv.lastApplied=%d, msg.CommandIndex=%d", kv.lastApplied, msg.CommandIndex)
+		}
+		// common operation
+		kv.lastApplied = msg.CommandIndex
+		kv.handleLogEntry(msg.Command.(Op))
+	case raft.MsgInstallSnapshot:
+		if msg.CommandIndex <= kv.lastApplied {
+			logrus.Fatalf("install invalid snapshot kv.lastApplied=%d, msg.CommandIndex=%d", kv.lastApplied, msg.CommandIndex)
+		}
+		// install snapshot
+		kv.lastApplied = msg.CommandIndex
+		kv.snapshotInclude = msg.CommandIndex
+		kv.installSnapshot(msg.Command.([]byte))
+	case raft.MsgMakeSnapshot:
+		if msg.CommandIndex != kv.lastApplied {
+			panic("wrong order")
+		}
+		logrus.Infof("KVServer receive MsgMakeSnapshot %+v", msg)
+		kv.snapshot()
+	}
+}
+
+func (kv *KVServer) handleLogEntry(op Op) {
 	kv.idempotentApply(op)
 	if _, isLeader := kv.rf.GetState(); !isLeader {
 		// drop output (In fact, there is no blocked RPC )
@@ -138,13 +152,6 @@ func awakenRPC(ch chan<- string, val string) {
 		logrus.Warnf("failed to awaken RPC")
 	case ch <- val:
 	}
-}
-
-func (kv *KVServer) needSnapshot() bool {
-	if kv.maxraftstate <= 0 {
-		return false
-	}
-	return (kv.lastApplied-kv.snapshotInclude)*LogEntrySize > kv.maxraftstate
 }
 
 func (kv *KVServer) snapshot() {
@@ -217,14 +224,12 @@ func StartKVServer(servers []*labrpc.ClientEnd, me int, persister *raft.Persiste
 
 	kv := &KVServer{
 		me:           me,
-		maxraftstate: maxraftstate,
 		applyCh:      make(chan raft.ApplyMsg),
 		state:        make(map[string]string),
 		clientSerial: make(map[int]int),
 	}
-	kv.rf = raft.Make(servers, me, persister, kv.applyCh)
-
-	go kv.ApplyToStateMachine()
+	kv.rf = raft.Make(servers, me, persister, kv.applyCh, maxraftstate)
+	go kv.MonitorMsgFromRaft()
 	logrus.Infof("%s started....", kv)
 	return kv
 }
