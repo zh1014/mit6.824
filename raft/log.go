@@ -367,7 +367,8 @@ func (log *Log) synced(pid int) bool {
 func (log *Log) Snapshot(lastIncluded int) {
 	ri, err := log.MToR(lastIncluded)
 	if err != nil {
-		panic(fmt.Sprintf("%s snapshot unknown error: %v, lastIncluded=%d, log.Brief=%s", log.raftHandle.Brief(), err, lastIncluded, log.Brief()))
+		logrus.Debugf("%s need not to make snapshot: %v, lastIncluded=%d, log.Brief=%s", log.raftHandle.Brief(), err, lastIncluded, log.Brief())
+		return
 	}
 	if log.snapshotMaking < lastIncluded {
 		log.snapshotMaking = lastIncluded
