@@ -66,10 +66,10 @@ func (ck *Clerk) Get(key string) (val string) {
 		SerialNo: ck.serialNo,
 		Key:      key,
 	}
-	logrus.Infof("%s Get(%+v)", ck, args)
+	logrus.Tracef("%s Get(%+v)", ck, args)
 	defer func() {
 		ck.serialNo++
-		logrus.Infof("%s Get(%+v) finished, value=(%s)", ck, args, val)
+		logrus.Tracef("%s Get(%+v) finished, value=(%s)", ck, args, val)
 	}()
 	for {
 		reply := &GetReply{}
@@ -121,10 +121,10 @@ func (ck *Clerk) PutAppend(key string, value string, op string) {
 		Value:    value,
 		Op:       op,
 	}
-	logrus.Infof("%s PutAppend(%+v)", ck, args)
+	logrus.Tracef("%s PutAppend(%+v)", ck, args)
 	defer func() {
 		ck.serialNo++
-		logrus.Infof("%s PutAppend(%+v) finished", ck, args)
+		logrus.Tracef("%s PutAppend(%+v) finished", ck, args)
 	}()
 	for {
 		reply := &PutAppendReply{}

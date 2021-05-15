@@ -37,7 +37,7 @@ type KVServer struct {
 }
 
 func (kv *KVServer) Get(args *GetArgs, reply *GetReply) {
-	logrus.Infof("%s exec Get(%+v)", kv, args)
+	logrus.Tracef("%s exec Get(%+v)", kv, args)
 	waitChan := make(chan string)
 	op := Op{
 		ClientID: args.ClientID,
@@ -60,7 +60,7 @@ func (kv *KVServer) Get(args *GetArgs, reply *GetReply) {
 }
 
 func (kv *KVServer) PutAppend(args *PutAppendArgs, reply *PutAppendReply) {
-	logrus.Infof("%s exec PutAppend(%+v)", kv, args)
+	logrus.Tracef("%s exec PutAppend(%+v)", kv, args)
 	waitChan := make(chan string)
 	op := Op{
 		ClientID: args.ClientID,
@@ -114,7 +114,7 @@ func (kv *KVServer) handleMsg(msg raft.ApplyMsg) {
 		if msg.CommandIndex != kv.lastApplied {
 			panic("wrong order")
 		}
-		logrus.Infof("KVServer receive MsgMakeSnapshot %+v", msg)
+		logrus.Infof("%s receive MsgMakeSnapshot %+v", kv, msg)
 		kv.snapshot()
 	}
 }

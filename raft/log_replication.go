@@ -70,7 +70,6 @@ func (rf *Raft) onReceiveHeartbeat(leaderID, leaderTerm int) {
 	rf.resetTimeout()
 	if (leaderTerm == rf.currentTerm && rf.role != follower) || leaderTerm > rf.currentTerm {
 		rf.becomeFollower(leaderTerm)
-		rf.curLeader = leaderID
 	}
 }
 

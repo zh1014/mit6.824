@@ -245,8 +245,8 @@ func (log *Log) String() string {
 }
 
 func (log *Log) Brief() string {
-	return fmt.Sprintf("{commit:%d,app:%d,include:%d,inclTerm:%d,entries:%s}",
-		log.commitIndex, log.lastApplied, log.lastIncluded, log.lastIncludeTerm, log.EntriesBrief())
+	return fmt.Sprintf("{commit:%d,app:%d,include:%d,inclTerm:%d,(%d)entries:%s}",
+		log.commitIndex, log.lastApplied, log.lastIncluded, log.lastIncludeTerm, log.Len(), log.EntriesBrief())
 }
 
 func (log *Log) EntriesBrief() string {
@@ -367,7 +367,7 @@ func (log *Log) synced(pid int) bool {
 func (log *Log) Snapshot(lastIncluded int) {
 	ri, err := log.MToR(lastIncluded)
 	if err != nil {
-		panic(fmt.Sprintf("snapshot unknown error: %v", err))
+		panic(fmt.Sprintf("%s snapshot unknown error: %v, lastIncluded=%d, log.Brief=%s", log.raftHandle.Brief(), err, lastIncluded, log.Brief()))
 	}
 	if log.snapshotMaking < lastIncluded {
 		log.snapshotMaking = lastIncluded
@@ -419,7 +419,6 @@ func (log *Log) encode(encoder *labgob.LabEncoder) {
 	checkErr(encoder.Encode(log.entries))
 	checkErr(encoder.Encode(log.matchWithLeader))
 	checkErr(encoder.Encode(log.commitIndex))
-	checkErr(encoder.Encode(log.snapshotMaking))
 	checkErr(encoder.Encode(log.lastIncluded))
 	checkErr(encoder.Encode(log.lastIncludeTerm))
 	log.leaderState.encode(encoder)
@@ -429,8 +428,8 @@ func (log *Log) decode(decoder *labgob.LabDecoder) {
 	checkErr(decoder.Decode(&log.entries))
 	checkErr(decoder.Decode(&log.matchWithLeader))
 	checkErr(decoder.Decode(&log.commitIndex))
-	checkErr(decoder.Decode(&log.snapshotMaking))
 	checkErr(decoder.Decode(&log.lastIncluded))
+	log.snapshotMaking = log.lastIncluded
 	checkErr(decoder.Decode(&log.lastIncludeTerm))
 	log.leaderState.decode(decoder)
 }

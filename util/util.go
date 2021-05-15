@@ -6,7 +6,7 @@ import (
 	"time"
 )
 
-const LogOutput = "/Users/zhanghao1/code/6.824/output.log"
+const LogOutput = "/Users/zhanghao1/code/6.824/output.txt"
 
 func LogConfig() {
 	logrus.SetLevel(logrus.DebugLevel)

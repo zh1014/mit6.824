@@ -139,12 +139,6 @@ func (rf *Raft) GetState() (int, bool) {
 	return rf.currentTerm, rf.role == leader
 }
 
-func (rf *Raft) GetCurLeader() int {
-	rf.Lock()
-	defer rf.Unlock()
-	return rf.curLeader
-}
-
 func (rf *Raft) voted() bool {
 	return rf.votedFor >= 0
 }
@@ -277,7 +271,6 @@ func (rf *Raft) becomeLeader() {
 	rf.MarkDirty()
 	logrus.Infof("%s -> leader", rf.Brief())
 	rf.role = leader
-	rf.curLeader = rf.me
 	rf.Log.initLeaderState(rf)
 	rf.startLogReplication()
 }
@@ -309,7 +302,6 @@ func Make(peers []*labrpc.ClientEnd, me int,
 		persister:   persister,
 		maxRaftSize: maxSize,
 		rand:        rand.New(rand.NewSource(time.Now().UnixNano())),
-		curLeader:   -1,
 	}
 	rf.initLog()
 	if persist := persister.ReadRaftState(); len(persist) > 0 {

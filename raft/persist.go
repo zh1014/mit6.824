@@ -14,7 +14,6 @@ func (rf *Raft) ReadPersist(data []byte) {
 	checkErr(decoder.Decode(&rf.role))
 	checkErr(decoder.Decode(&rf.votedFor))
 	checkErr(decoder.Decode(&rf.voteGot))
-	checkErr(decoder.Decode(&rf.curLeader))
 	rf.Log.decode(decoder)
 }
 
@@ -31,7 +30,6 @@ func (rf *Raft) marshal() []byte {
 	checkErr(encoder.Encode(rf.role))
 	checkErr(encoder.Encode(rf.votedFor))
 	checkErr(encoder.Encode(rf.voteGot))
-	checkErr(encoder.Encode(rf.curLeader))
 	rf.Log.encode(encoder)
 	return buffer.Bytes()
 }
